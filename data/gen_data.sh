@@ -2,8 +2,8 @@ OUT=$1
 FINAL=$2
 DATASET=$3
 
-TARGET=70b
-DRAFT=7b
+TARGET=13b
+DRAFT=1b
 
 mkdir -p ${OUT}
 mkdir -p ${OUT}/tmp

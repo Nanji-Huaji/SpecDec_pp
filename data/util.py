@@ -8,10 +8,17 @@ import argparse
 
 
 CKPT = {
-    '7b': "meta-llama/Llama-2-7b-chat-hf",
-    '13b': "meta-llama/Llama-2-13b-chat-hf",
-    '70b': "meta-llama/Llama-2-70b-chat-hf"
+    "68m": "llama/llama-68m",
+    "1b": "llama/tiny-llama-1.1b",
+    "7b": "llama/Llama-2-7b-hf",
+    "13b": "llama/Llama-2-13b-hf",
+    "70b": "meta-llama/Llama-2-70b-chat-hf",
 }
+
+root_dir = "/home/tiantianyi/code/DuoDecoding"
+
+for key in CKPT:
+    CKPT[key] = os.path.join(root_dir, CKPT[key])
 
 
 def get_model(model_name):
@@ -19,8 +26,8 @@ def get_model(model_name):
     dtype = torch.bfloat16
     print('model checkpoint: ', checkpoint)
     print('model dtype: ', dtype)
-    model = AutoModelForCausalLM.from_pretrained(checkpoint, torch_dtype=dtype, device_map='auto')
-    tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+    model = AutoModelForCausalLM.from_pretrained(checkpoint, torch_dtype=dtype, device_map='auto', local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(checkpoint, local_files_only=True)
     return tokenizer, model
 
 def get_dataset(name):

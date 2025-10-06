@@ -38,7 +38,7 @@ def get_assistant_result(data, assistant_model, model_name, do_sample):
 def parse_args():
     parser = argparse.ArgumentParser(description='data generator')
 
-    parser.add_argument('--model_name', type=str, choices=["7b"], default='7b')
+    parser.add_argument('--model_name', type=str, default='7b')
     parser.add_argument('--input_file', type=str)
     parser.add_argument('--output_file', type=str, default=None)
     parser.add_argument('--do_sample', action='store_true')

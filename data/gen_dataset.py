@@ -103,7 +103,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description='data generator')
 
     parser.add_argument('--dataset_name', type=str)
-    parser.add_argument('--model_name', type=str, choices=["7b", "13b", "70b"])
+    parser.add_argument('--model_name', type=str)
     parser.add_argument('--mode', type=str, choices=['hf']) 
     parser.add_argument('--do_sample', action='store_true')
     parser.add_argument('--n_begin', type=int, default=0)
