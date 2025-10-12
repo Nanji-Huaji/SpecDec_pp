@@ -60,9 +60,9 @@ class MyTrainer(Trainer):
         label_1 = torch.ones_like(soft_labels, dtype=torch.long).to(soft_labels.device) * IGNORE_INDEX
         label_1[mask] = 1
 
-        outputs = model.model(**inputs, output_hidden_states = True, return_dict=True)
-        hidden_states = outputs.get("hidden_states")
-        orignal_logits = model.assist_acc_head(hidden_states[-1])
+        outputs = model.module.model(**inputs, output_hidden_states = True, return_dict=True)
+        print("hidden_states:", len(hidden_states), hidden_states[-1].shape)
+        orignal_logits = model.module.assist_acc_head(hidden_states[-1])
         orignal_logits = orignal_logits.float()
 
         num_class = 2
@@ -216,7 +216,7 @@ if __name__ == "__main__":
     training_args = parser.parse_args_into_dataclasses()[0]
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(training_args.model_name_or_path)
-    model = transformers.AutoModelForCausalLM.from_pretrained(training_args.model_name_or_path)
+    model = transformers.AutoModelForCausalLM.from_pretrained(training_args.model_name_or_path, attn_implementation="eager")
     special_tokens_dict = dict()
     if tokenizer.pad_token is None:
         special_tokens_dict["pad_token"] = DEFAULT_PAD_TOKEN

@@ -28,14 +28,19 @@ class AcceptancePredictionHead(nn.Module, PyTorchModelHubMixin):
         self.config=config
         hidden_size = config['hidden_size']
         num_layers = config.get('num_layers', 0)
+        blocks = [ResBlock(hidden_size) for _ in range(num_layers)]
         super().__init__()
-        self.model = nn.Sequential( *([ResBlock(hidden_size)] * num_layers), nn.Linear(hidden_size, 2) )
+        self.model = nn.Sequential( *blocks, nn.Linear(hidden_size, 2) )
 
     def forward(self, x):
         return self.model(x)
 
+
+
 class WrapModel(PreTrainedModel):
     def __init__(self, model, head):
+        if hasattr(model.config, "attn_implementation"):
+            model.config.attn_implementation = "eager"
         super().__init__(model.config)
         self.model = model
         self.assist_acc_head = head
