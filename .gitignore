@@ -1,2 +1,5 @@
 __pycache__
 data/datagen.log
+exp-weight6-layer3
+*.log
+*.json
