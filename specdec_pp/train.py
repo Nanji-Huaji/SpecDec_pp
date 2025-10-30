@@ -60,9 +60,20 @@ class MyTrainer(Trainer):
         label_1 = torch.ones_like(soft_labels, dtype=torch.long).to(soft_labels.device) * IGNORE_INDEX
         label_1[mask] = 1
 
-        outputs = model.module.model(**inputs, output_hidden_states = True, return_dict=True)
+        is_parallel = lambda model: isinstance(model, (torch.nn.DataParallel, torch.nn.parallel.DistributedDataParallel))
+
+        outputs = (
+            model.module.model(
+                **inputs, output_hidden_states=True, return_dict=True
+            )
+            if is_parallel(model)
+            else model.model(
+                **inputs, output_hidden_states=True, return_dict=True
+            )
+        )
+        hidden_states = outputs.hidden_states
         print("hidden_states:", len(hidden_states), hidden_states[-1].shape)
-        orignal_logits = model.module.assist_acc_head(hidden_states[-1])
+        orignal_logits = model.module.assist_acc_head(hidden_states[-1]) if is_parallel(model) else model.assist_acc_head(hidden_states[-1])
         orignal_logits = orignal_logits.float()
 
         num_class = 2
@@ -89,7 +100,7 @@ class MyTrainer(Trainer):
             predicted_logits = logits[mask, :]
             predicted_log_prob = torch.log_softmax(predicted_logits, dim=-1)
 
-            #KL_binary = target_prob * (target_prob.log() - predicted_log_prob[:,1]) + (1-target_prob) * ( (1-target_prob).log() - predicted_log_prob[:,0])
+            # KL_binary = target_prob * (target_prob.log() - predicted_log_prob[:,1]) + (1-target_prob) * ( (1-target_prob).log() - predicted_log_prob[:,0])
 
             CrossEnt = target_prob * ( - predicted_log_prob[:,1]) + (1-target_prob) * ( - predicted_log_prob[:,0])
             Ent = target_prob * target_prob.log() + (1-target_prob) * (1-target_prob).log()
@@ -98,7 +109,6 @@ class MyTrainer(Trainer):
             KL_binary = KL_binary.mean().item()
 
             self.log({'KL': KL_binary})
-
 
         if return_outputs:
             outputs = (loss, orignal_logits)
@@ -144,7 +154,6 @@ def smart_tokenizer_and_embedding_resize(
 
         input_embeddings[-num_new_tokens:] = input_embeddings_avg
         output_embeddings[-num_new_tokens:] = output_embeddings_avg
-
 
 
 class SupervisedDataset(Dataset):
@@ -207,8 +216,6 @@ class DataCollatorForSupervisedDataset(object):
             soft_labels=soft_labels,
             attention_mask=input_ids.ne(self.tokenizer.pad_token_id),
         )
-
-
 
 
 if __name__ == "__main__":
