@@ -97,6 +97,29 @@ def infer(prompt, tokenizer, model, max_length = 32, do_sample=False):
 
     return  prefix_token_id.cpu().tolist() , gen_token_id.cpu().tolist(), ret
 
+def contiune_from_ckpt_idx(ckpt_file: str) -> int:
+    """
+        get the index to continue from checkpoint file
+        defaultly the ckpt file is the output file(json)
+    """
+    if not os.path.exists(ckpt_file):
+        return 0
+    with open(ckpt_file, 'r') as f:
+        data: list = json.loads(f.read())
+    idx = len(data)
+    print(f"continue from index {idx}")
+    return idx
+
+
+def save_ckpt(ckpt_file: str, data: list) -> None:
+    """
+    update checkpoint file with preserve previous data(json)
+    """
+    with open(ckpt_file, 'w') as f:
+        previous_data: list = json.loads(f.read()) if os.path.exists(ckpt_file) else []
+        previous_data.extend(data)
+        f.write(json.dumps(previous_data, indent=2))
+
 
 
 def parse_args():
@@ -110,10 +133,13 @@ def parse_args():
     parser.add_argument('--n_end', type=int, default=-1)
     parser.add_argument('--max_length', type=int, default=512)
     parser.add_argument('--output_file', type=str, default=None)
+    parser.add_argument('--ckpt_file', type=str, default=None)
 
 
 
     args = parser.parse_args()
+    if args.ckpt_file is None:
+        args.ckpt_file = args.output_file
 
     return args
 
@@ -131,6 +157,10 @@ def main(args):
         args.n_end = len(dataset)
     args.n_end = min(args.n_end, len(dataset))
 
+    start_idx = contiune_from_ckpt_idx(args.ckpt_file)
+    if start_idx > args.n_begin:
+        args.n_begin = start_idx
+
     res_dict = []
     for i in tqdm(range(args.n_begin, args.n_end)):
         sample = dataset[i]
@@ -144,6 +174,8 @@ def main(args):
                 'tokens': str(gen_token) if gen_token is not None else ""
             }
         )
+        if args.ckpt_file is not None and (i - args.n_begin) % 100 == 0:
+            save_ckpt(args.ckpt_file, res_dict)
 
     if args.output_file is None:
         args.output_file = f'dataset{args.n_begin}to{args.n_end}_{args.mode}{args.model_name}.json'

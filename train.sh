@@ -1,10 +1,10 @@
 layer=3
 weight=6
-draft_model=/home/tiantianyi/code/DuoDecoding/llama/llama-68m
+draft_model=/home/tiantianyi/code/DuoDecoding/llama/tiny-llama-1.1b
 
-WANDB_PROJECT=specdecpp python3 specdec_pp/train.py \
-    --data_path /home/tiantianyi/code/DuoDecoding/src/SpecDec_pp/data/train.json \
-    --eval_data_path /home/tiantianyi/code/DuoDecoding/src/SpecDec_pp/data/dev.json \
+WANDB_PROJECT=specdecpp CUDA_VISIBLE_DEVICES=1 python3 specdec_pp/train.py \
+    --data_path /home/tiantianyi/code/DuoDecoding/src/SpecDec_pp/data_collections/llama-13b/train.json \
+    --eval_data_path /home/tiantianyi/code/DuoDecoding/src/SpecDec_pp/data_collections/llama-13b/dev.json \
     --output_dir exp-weight${weight}-layer${layer} \
     --model_name_or_path ${draft_model} \
     --bf16 True \

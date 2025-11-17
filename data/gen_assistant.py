@@ -20,8 +20,13 @@ def read_data(filename):
 
 
 @torch.no_grad()
-def get_assistant_result(data, assistant_model, model_name, do_sample):
+def get_assistant_result(data, assistant_model, model_name, do_sample, save_process: bool = True):
+    start_idx = read_process(None, data=data)
+    loop_idx = 0
     for item in data:
+        if loop_idx < start_idx:
+            loop_idx += 1
+            continue
         joint = item['prefix'] + item['tokens']
         joint = torch.LongTensor(joint).to(assistant_model.device)
         joint = joint.unsqueeze(0)
@@ -33,7 +38,34 @@ def get_assistant_result(data, assistant_model, model_name, do_sample):
         else:
             new_token = sm_logits.argmax(dim=-1) # bs * seq_len
             item['draft'] = new_token[0, len(item['prefix'])-1 : -1].tolist()
+
+        if save_process and (loop_idx - start_idx) % 100 == 0:
+            if args.output_file is None or len(args.output_file) == 0:
+                if args.do_sample:
+                    suffix = 'stochastic'
+                else:
+                    suffix = 'greedy'
+            args.output_file = args.input_file.rstrip('.json') + '_' + args.model_name + suffix + '.json'
+            data = pretty_format(data)
+            with open(args.output_file, 'w') as f:
+                f.write(json.dumps(data, indent=2))
+        loop_idx += 1
     return data
+
+
+def read_process(filename: str | None, data: list | None) -> int:
+    if filename is not None:
+        with open(filename, 'r') as f:
+            data = json.load(f)
+    assert data is not None, "Either filename or data should be provided."
+    idx: int = 0
+    if len(data) > 0:
+        for item in data:
+            draft = item.get('draft', None)
+            if draft is not None and len(draft) > 0:
+                idx += 1
+    return idx
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description='data generator')
@@ -64,4 +96,3 @@ if __name__ == "__main__":
 
     with open(args.output_file, 'w') as f:
         f.write(json.dumps(data, indent=2))
-
