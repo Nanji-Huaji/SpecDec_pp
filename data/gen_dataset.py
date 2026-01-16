@@ -1,49 +1,75 @@
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-import time
+from vllm import LLM, SamplingParams
+from transformers import AutoTokenizer
 import json
-import torch
-from datasets import load_dataset, load_from_disk
-import os
 import argparse
-from tqdm import tqdm
-from util import CKPT, get_model, get_dataset, pretty_format
+import os
+from util import get_dataset, get_model, CKPT
 
+# Copy helper functions from gen_dataset.py
 B_INST, E_INST = "[INST]", "[/INST]"
-B_SYS, E_SYS = "<<SYS>>\n", "\n<</SYS>>\n\n"
+import subprocess
+import re
 
-SPECIAL_TAGS = [B_INST, E_INST, "<<SYS>>", "<</SYS>>"]
-UNSAFE_ERROR = "Error: special tags are not allowed as part of the prompt."
 
-def get_prompt(sample, dataset_name):
+def select_best_gpu():
     """
-        wrap the prompt in llama-2-chat format.
+    Select the GPU with the most free memory.
+    Returns the GPU index as a string (e.g., "0").
     """
-    if dataset_name == 'tatsu-lab/alpaca':
-        prompt = get_prompt_alpaca(sample)
-    elif dataset_name == 'openai_humaneval':
-        prompt = get_prompt_humaneval(sample)
-    elif dataset_name == 'gsm8k_test':
-        prompt = get_prompt_gsm8k(sample)
+    # Check if CUDA_VISIBLE_DEVICES is already set by user
+    if "CUDA_VISIBLE_DEVICES" in os.environ:
+        print(
+            f"CUDA_VISIBLE_DEVICES is already set to {os.environ['CUDA_VISIBLE_DEVICES']}. Using specified GPU."
+        )
+        return os.environ["CUDA_VISIBLE_DEVICES"]
 
-    return f"{B_INST} {prompt.strip()} {E_INST}"
+    try:
+        # Run nvidia-smi to get memory usage
+        result = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,memory.free",
+                "--format=csv,noheader,nounits",
+            ],
+            encoding="utf-8",
+        )
+
+        # Parse output: "0, 12000" -> index=0, free_mem=12000
+        gpu_stats = []
+        for line in result.strip().split("\n"):
+            idx, free_mem = line.split(",")
+            gpu_stats.append((int(idx), int(free_mem.strip())))
+
+        if not gpu_stats:
+            print("No GPUs found via nvidia-smi. Defaulting to 0.")
+            return "0"
+
+        # Sort by free memory descending
+        gpu_stats.sort(key=lambda x: x[1], reverse=True)
+        best_gpu_idx, best_free_mem = gpu_stats[0]
+
+        print(
+            f"Auto-selecting GPU {best_gpu_idx} with {best_free_mem} MiB free."
+        )
+        return str(best_gpu_idx)
+
+    except FileNotFoundError:
+        print("nvidia-smi not found. Defaulting to GPU 0.")
+        return "0"
+    except Exception as e:
+        print(f"Error selecting GPU: {e}. Defaulting to GPU 0.")
+        return "0"
 
 
 def get_prompt_alpaca(sample):
-    """
-        for alpaca format only
-    """
-    if sample['input'] is None or len(sample['input'].strip()) == 0:
-        prompt = sample['instruction']
+    if sample["input"] is None or len(sample["input"].strip()) == 0:
+        prompt = sample["instruction"]
     else:
-        prompt = sample['instruction'] + '\nInput: ' + sample['input']
+        prompt = sample["instruction"] + "\nInput: " + sample["input"]
     return prompt
-    
+
 
 def get_prompt_humaneval(sample):
-    """
-        OpenAI HumanEval
-        prompt format https://github.com/nlpxucan/WizardLM/blob/main/WizardCoder/src/humaneval_gen.py
-    """
     INSTRUCTION = """Below is an instruction that describes a task. Write a response that appropriately completes the request.
 
 
@@ -52,134 +78,144 @@ Create a Python script for this problem:
 {prompt}
 
 ### Response:"""
-    return INSTRUCTION.format(prompt=sample['prompt'])
+    return INSTRUCTION.format(prompt=sample["prompt"])
+
 
 def get_prompt_gsm8k(sample):
-    """
-        gsm8K
-        prompt format https://github.com/meta-math/MetaMath/blob/main/eval_gsm8k.py
-    """
     problem_prompt = (
         "Below is an instruction that describes a task. "
         "Write a response that appropriately completes the request.\n\n"
         "### Instruction:\n{instruction}\n\n### Response: Let's think step by step."
     )
-    return problem_prompt.format(instruction=sample['question'])
+    return problem_prompt.format(instruction=sample["question"])
 
 
-def sanity_check(sample, tokenizer):
-    inputs = tokenizer(get_prompt(sample), return_tensors='pt')
-    input_ids = inputs['input_ids']
-    assert input_ids[0][0] == tokenizer.bos_token_id, 'the first should be <bos>'
-    assert input_ids[0][-1] != tokenizer.eos_token_id, 'the last should not be <eos>'
-    print("sanity check passed")
-
-
-def infer(prompt, tokenizer, model, max_length = 32, do_sample=False):
-
-    device = "cuda"
-    inputs = tokenizer(prompt, return_tensors="pt").to(device)
-    max_length += len(inputs['input_ids'][0]) 
-    model_output = model.generate(**inputs, do_sample=do_sample, max_length = max_length)[0]
-
-    ret = tokenizer.decode(model_output, skip_special_tokens=True)
-
-
-    # Is it possible that this is not reversible? after decoding, the tokens changed? Yes!
-
-    #re_token = tokenizer.encode(ret, return_tensors='pt').to(device)
-    #if re_token.shape != model_output.shape or  (re_token - model_output).sum().item() != 0:
-        #print("mismatch!")
-
-    prefix_token_id =  model_output[:len(inputs['input_ids'][0])]
-    gen_token_id = model_output[len(inputs['input_ids'][0]) :]
-    ret = ret[len(prompt):] # remove prefix
-
-    return  prefix_token_id.cpu().tolist() , gen_token_id.cpu().tolist(), ret
-
-def contiune_from_ckpt_idx(ckpt_file: str) -> int:
+def get_prompt(sample, dataset_name, model_name=""):
     """
-        get the index to continue from checkpoint file
-        defaultly the ckpt file is the output file(json)
+    wrap the prompt in llama-2-chat format or qwen format.
     """
-    if not os.path.exists(ckpt_file):
-        return 0
-    with open(ckpt_file, 'r') as f:
-        data: list = json.loads(f.read())
-    idx = len(data)
-    print(f"continue from index {idx}")
-    return idx
+    if dataset_name == "tatsu-lab/alpaca":
+        prompt = get_prompt_alpaca(sample)
+    elif dataset_name == "openai_humaneval":
+        prompt = get_prompt_humaneval(sample)
+    elif dataset_name == "gsm8k_test":
+        prompt = get_prompt_gsm8k(sample)
 
+    if "qwen" in str(model_name).lower():
+        # Qwen ChatML format
+        return f"<|im_start|>user\n{prompt.strip()}<|im_end|>\n<|im_start|>assistant\n"
 
-def save_ckpt(ckpt_file: str, data: list) -> None:
-    """
-    update checkpoint file with preserve previous data(json)
-    """
-    with open(ckpt_file, 'w') as f:
-        previous_data: list = json.loads(f.read()) if os.path.exists(ckpt_file) else []
-        previous_data.extend(data)
-        f.write(json.dumps(previous_data, indent=2))
-
+    return f"{B_INST} {prompt.strip()} {E_INST}"
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='data generator')
-
-    parser.add_argument('--dataset_name', type=str)
-    parser.add_argument('--model_name', type=str)
-    parser.add_argument('--mode', type=str, choices=['hf']) 
-    parser.add_argument('--do_sample', action='store_true')
-    parser.add_argument('--n_begin', type=int, default=0)
-    parser.add_argument('--n_end', type=int, default=-1)
-    parser.add_argument('--max_length', type=int, default=512)
-    parser.add_argument('--output_file', type=str, default=None)
-    parser.add_argument('--ckpt_file', type=str, default=None)
-
-
-
+    parser = argparse.ArgumentParser(description="data generator with vllm")
+    parser.add_argument("--dataset_name", type=str, required=True)
+    parser.add_argument("--model_name", type=str, required=True)
+    parser.add_argument("--mode", type=str, choices=["hf"], default="hf")
+    parser.add_argument("--do_sample", action="store_true")
+    parser.add_argument("--n_begin", type=int, default=0)
+    parser.add_argument("--n_end", type=int, default=-1)
+    parser.add_argument("--max_length", type=int, default=512)
+    parser.add_argument("--output_file", type=str, default=None)
+    parser.add_argument("--gpu_memory_utilization", type=float, default=0.9)
     args = parser.parse_args()
-    if args.ckpt_file is None:
-        args.ckpt_file = args.output_file
-
     return args
 
 
-
 def main(args):
-    #sanity_check(dataset[0], tokenizer)
+    print(f"Using vLLM with do_sample={args.do_sample}")
 
-    print(f"we are using do sample = {args.do_sample}")
+    # Auto-select GPU before initializing vLLM
+    # This must be done BEFORE importing vLLM or initializing it if vLLM respects CUDA_VISIBLE_DEVICES
+    # However, since vLLM is already imported at top, setting environ here might affect LLM.__init__
+    best_gpu = select_best_gpu()
+    os.environ["CUDA_VISIBLE_DEVICES"] = best_gpu
 
-    tokenizer, model = get_model(args.model_name)
+    # Resolve model path using util.CKPT logic
+    # Note: vLLM loads model by path directly
+    root_dir = (
+        "/home/tty/code/DuoDecoding"  # hardcoded based on util.py context
+    )
+    # Try to resolve simplified name if present in CKPT, else use as is
+    # Logic copied roughly from util.py but adapted because util.py modifies CKPT in place
+    model_path = args.model_name
+    # If users passed a short name key that exists in CKPT logic (though util.py is tricky to import variables from perfectly if they run code outside main)
+    # We will assume args.model_name is the full path or HF hub id as passed in shell script
+
+    print(f"Loading model: {model_path}")
+
+    # Initialize vLLM
+    # tensor_parallel_size=1 ideally for single GPU.
+    # Disable v1 engine for now to fallback to stable v0 engine (which is more compatible)
+    os.environ["VLLM_USE_V1"] = "0"
+
+    llm = LLM(
+        model=model_path,
+        trust_remote_code=True,
+        tensor_parallel_size=1,
+        gpu_memory_utilization=0.75,  # Lowered to avoid OOM
+        dtype="bfloat16",  # Enforce bfloat16 for modern GPUs/Models like Qwen
+    )
+
+    # Load dataset
     dataset = get_dataset(args.dataset_name)
 
+    # Determine range
     if args.n_end == -1:
         args.n_end = len(dataset)
-    args.n_end = min(args.n_end, len(dataset))
+    n_end = min(args.n_end, len(dataset))
 
-    start_idx = contiune_from_ckpt_idx(args.ckpt_file)
-    if start_idx > args.n_begin:
-        args.n_begin = start_idx
+    print(f"Processing range: {args.n_begin} to {n_end}")
 
-    res_dict = []
-    for i in tqdm(range(args.n_begin, args.n_end)):
+    # Prepare prompts
+    prompts = []
+    # We need to keep indices to map back if needed, but here we just process sequentially
+    for i in range(args.n_begin, n_end):
         sample = dataset[i]
-        prompt = get_prompt(sample, args.dataset_name)
-        prefix_token, gen_token, s = infer(prompt, tokenizer, model, max_length=args.max_length, do_sample=args.do_sample)
+        prompt_text = get_prompt(sample, args.dataset_name, args.model_name)
+        prompts.append(prompt_text)
+
+    if not prompts:
+        print("No prompts to process.")
+        return
+
+    # Set sampling params
+    # Note: Gen_dataset.py used max_length as 'length of generation', i.e. max_new_tokens
+    sampling_params = SamplingParams(
+        max_tokens=args.max_length,
+        temperature=1.0 if args.do_sample else 0.0,
+        top_p=1.0 if args.do_sample else 1.0,
+        # stop_token_ids etc can be added if needed, but Qwen handles special tokens well
+    )
+
+    # Generate
+    outputs = llm.generate(prompts, sampling_params)
+
+    # Format results
+    res_dict = []
+
+    for i, output in enumerate(outputs):
+        generated_text = output.outputs[0].text
+        generated_token_ids = list(output.outputs[0].token_ids)
+        prompt_token_ids = list(output.prompt_token_ids)
+
+        # Original format requires 'prompt' (text), 'continuation' (text), 'prefix' (str list), 'tokens' (str list)
         res_dict.append(
             {
-                'prompt': prompt,
-                'continuation': s,
-                'prefix': str(prefix_token) if prefix_token is not None else "",
-                'tokens': str(gen_token) if gen_token is not None else ""
+                "prompt": prompts[i],
+                "continuation": generated_text,
+                "prefix": str(prompt_token_ids),
+                "tokens": str(generated_token_ids),
             }
         )
-        if args.ckpt_file is not None and (i - args.n_begin) % 100 == 0:
-            save_ckpt(args.ckpt_file, res_dict)
 
+    # Infer output filename if not provided
     if args.output_file is None:
-        args.output_file = f'dataset{args.n_begin}to{args.n_end}_{args.mode}{args.model_name}.json'
-    with open(args.output_file, 'w') as f:
+        args.output_file = f"dataset{args.n_begin}to{n_end}_{args.mode}{os.path.basename(args.model_name)}.json"
+
+    print(f"Saving {len(res_dict)} results to {args.output_file}")
+    with open(args.output_file, "w") as f:
         f.write(json.dumps(res_dict, indent=2))
 
 
