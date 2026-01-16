@@ -4,8 +4,8 @@ thres=0.3
 
 ckpt=exp-weight${weight}-layer${layer}
 
-target_model=/home/tiantianyi/code/DuoDecoding/llama/tiny-llama-1.1b
-draft_model=/home/tiantianyi/code/DuoDecoding/llama/llama-68m
+target_model=/home/tiantianyi/code/DuoDecoding/qwen/Qwen3-14B
+draft_model=/home/tiantianyi/code/DuoDecoding/qwen/Qwen3-1.7B
 data=/home/tiantianyi/code/DuoDecoding/src/SpecDec_pp/data/dev.json
 SAVEPATH=/home/tiantianyi/code/DuoDecoding/src/SpecDec_pp/exp-weight6-layer3
 

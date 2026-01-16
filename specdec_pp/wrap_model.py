@@ -10,6 +10,8 @@ from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 from huggingface_hub import PyTorchModelHubMixin
 
+from functools import reduce
+
 logger = logging.get_logger(__name__)
 
 
@@ -47,6 +49,23 @@ class WrapModel(PreTrainedModel):
 
     def forward(self, input_ids = None, labels = None, **kwargs):
         return self.model(input_ids = input_ids, labels = labels, **kwargs)
+
+class NetModel(WrapModel):
+    """
+    Consider the network environment for prediction
+    """
+    def __init__(self, model, head):
+        super().__init__(model, head)
+
+    def forward(self, t_slm, t_llm, transfer_top_k,  bandwidth,input_ids = None, labels = None, **kwargs):
+        outputs = self.model(input_ids = input_ids, labels = labels, **kwargs)
+        probs = torch.softmax(outputs.logits, dim=-1)
+        C_bw = transfer_top_k / bandwidth
+        netgain = torch.prod(probs) * t_llm - outputs.shape[1] - (1 - C_bw)
+        
+        raise NotImplementedError
+
+    
 
 
 if __name__ == "__main__":
