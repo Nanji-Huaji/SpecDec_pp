@@ -1,9 +1,9 @@
-OUT=$1
-FINAL=$2
-DATASET=$3
+OUT=alpaca_data
+FINAL=all.json
+DATASET=tatsu-lab/alpaca
 
-TARGET=Qwen3-1.7B
-DRAFT=Qwen3-0.6B
+TARGET=/home/tiantianyi/code/DuoDecoding/qwen/Qwen3-14B
+DRAFT=/home/tiantianyi/code/DuoDecoding/qwen/Qwen3-1.7B
 
 mkdir -p ${OUT}
 mkdir -p ${OUT}/tmp

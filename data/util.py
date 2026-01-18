@@ -33,7 +33,7 @@ for key in CKPT:
 
 
 def get_model(model_name):
-    checkpoint = CKPT[model_name]
+    checkpoint = CKPT.get(model_name, model_name)
     dtype = torch.bfloat16
     print("model checkpoint: ", checkpoint)
     print("model dtype: ", dtype)

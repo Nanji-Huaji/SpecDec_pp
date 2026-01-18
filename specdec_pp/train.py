@@ -47,7 +47,7 @@ def compute_metrics(eval_pred: "EvalPrediction") -> Dict:
 
 class MyTrainer(Trainer):
 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         soft_labels = inputs.pop('soft_labels')
         mask = (soft_labels - IGNORE_INDEX).abs() > 0.1
 
