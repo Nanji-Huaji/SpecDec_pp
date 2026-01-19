@@ -21,7 +21,7 @@ def read_data(filename):
 
 @torch.no_grad()
 def get_log_prob(data, model, model_name):
-    for item in data:
+    for item in tqdm(data, desc="Calculating log probabilities"):
         joint = item["prefix"] + item["tokens"]
         joint = torch.LongTensor(joint).to(model.device)
         joint = joint.unsqueeze(0)
@@ -60,6 +60,9 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
+    if os.path.exists(args.output_file):
+        print(f"Output file {args.output_file} already exists. Exiting to avoid overwrite.")
+        exit(0)
     data = read_data(args.input_file)
 
     tokenizer, model = get_model(args.model_name)

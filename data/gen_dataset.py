@@ -104,6 +104,9 @@ def get_prompt(sample, dataset_name, model_name=""):
     if "qwen" in str(model_name).lower():
         # Qwen ChatML format
         return f"<|im_start|>user\n{prompt.strip()}<|im_end|>\n<|im_start|>assistant\n"
+    
+    if "vicuna" in str(model_name).lower():
+        return f"A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user.\n\nUSER: {prompt.strip()}\nASSISTANT:"
 
     return f"{B_INST} {prompt.strip()} {E_INST}"
 
@@ -124,6 +127,9 @@ def parse_args():
 
 
 def main(args):
+    if os.path.exists(args.output_file):
+        print(f"Output file {args.output_file} already exists. Exiting to avoid overwrite.")
+        return
     print(f"Using vLLM with do_sample={args.do_sample}")
 
     # Auto-select GPU before initializing vLLM

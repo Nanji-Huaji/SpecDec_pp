@@ -16,7 +16,7 @@ def read_data(filename):
 
 
 def get_acc_prob(data, target_name, draft_name):
-    for item in data:
+    for item in tqdm(data, desc="Calculating acceptance probabilities"):
         target_log_p = eval(item["log_p_" + target_name])
         target_log_p = torch.tensor(target_log_p)
 
@@ -46,6 +46,9 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
+    if os.path.exists(args.output_file):
+        print(f"Output file {args.output_file} already exists. Exiting to avoid overwrite.")
+        exit(0)
     data = read_data(args.input_file)
     data = get_acc_prob(
         data, target_name=args.target_name, draft_name=args.draft_name

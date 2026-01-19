@@ -11,75 +11,50 @@ from util import CKPT, get_model, pretty_format
 
 
 def read_data(filename):
-    data = json.load(open(filename,'r'))
-    for item in data: 
-        item['prefix'] = eval(item['prefix'])
-        item['tokens'] = eval(item['tokens'])
+    data = json.load(open(filename, "r"))
+    for item in data:
+        item["prefix"] = eval(item["prefix"])
+        item["tokens"] = eval(item["tokens"])
 
     return data
 
 
 @torch.no_grad()
-def get_assistant_result(data, assistant_model, model_name, do_sample, save_process: bool = True):
-    start_idx = read_process(None, data=data)
-    loop_idx = 0
-    for item in data:
-        if loop_idx < start_idx:
-            loop_idx += 1
-            continue
-        joint = item['prefix'] + item['tokens']
+def get_assistant_result(data, assistant_model, model_name, do_sample):
+    for item in tqdm(data, desc="Iterating"):
+        joint = item["prefix"] + item["tokens"]
         joint = torch.LongTensor(joint).to(assistant_model.device)
         joint = joint.unsqueeze(0)
-        sm_logits = assistant_model(input_ids = joint).logits
+        sm_logits = assistant_model(input_ids=joint).logits
         if do_sample:
             probs = sm_logits.softmax(dim=-1)  # bs * seq_len * vocab_size
             new_token = torch.multinomial(probs[0], num_samples=1).squeeze(-1)
-            item['draft'] = new_token[len(item['prefix'])-1 : -1].tolist()
+            item["draft"] = new_token[len(item["prefix"]) - 1 : -1].tolist()
         else:
-            new_token = sm_logits.argmax(dim=-1) # bs * seq_len
-            item['draft'] = new_token[0, len(item['prefix'])-1 : -1].tolist()
-
-        if save_process and (loop_idx - start_idx) % 100 == 0:
-            if args.output_file is None or len(args.output_file) == 0:
-                if args.do_sample:
-                    suffix = 'stochastic'
-                else:
-                    suffix = 'greedy'
-            args.output_file = args.input_file.rstrip('.json') + '_' + args.model_name + suffix + '.json'
-            data = pretty_format(data)
-            with open(args.output_file, 'w') as f:
-                f.write(json.dumps(data, indent=2))
-        loop_idx += 1
+            new_token = sm_logits.argmax(dim=-1)  # bs * seq_len
+            item["draft"] = new_token[0, len(item["prefix"]) - 1 : -1].tolist()
     return data
 
 
-def read_process(filename: str | None, data: list | None) -> int:
-    if filename is not None:
-        with open(filename, 'r') as f:
-            data = json.load(f)
-    assert data is not None, "Either filename or data should be provided."
-    idx: int = 0
-    if len(data) > 0:
-        for item in data:
-            draft = item.get('draft', None)
-            if draft is not None and len(draft) > 0:
-                idx += 1
-    return idx
-
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='data generator')
+    parser = argparse.ArgumentParser(description="data generator")
 
-    parser.add_argument('--model_name', type=str, default='7b')
-    parser.add_argument('--input_file', type=str)
-    parser.add_argument('--output_file', type=str, default=None)
-    parser.add_argument('--do_sample', action='store_true')
+    parser.add_argument("--model_name", type=str, choices=["7b"], default="7b")
+    parser.add_argument("--input_file", type=str)
+    parser.add_argument("--output_file", type=str, default=None)
+    parser.add_argument("--do_sample", action="store_true")
 
     args = parser.parse_args()
 
     return args
+
+
 if __name__ == "__main__":
     args = parse_args()
+    if os.path.exists(args.output_file):
+        print(f"Output file {args.output_file} already exists. Exiting to avoid overwrite.")
+        exit(0)
     data = read_data(args.input_file)
 
     tokenizer, model = get_model(args.model_name)
@@ -87,12 +62,18 @@ if __name__ == "__main__":
 
     if args.output_file is None or len(args.output_file) == 0:
         if args.do_sample:
-            suffix = 'stochastic'
+            suffix = "stochastic"
         else:
-            suffix = 'greedy'
-        args.output_file = args.input_file.rstrip('.json') + '_' + args.model_name + suffix + '.json'
+            suffix = "greedy"
+        args.output_file = (
+            args.input_file.rstrip(".json")
+            + "_"
+            + args.model_name
+            + suffix
+            + ".json"
+        )
 
     data = pretty_format(data)
 
-    with open(args.output_file, 'w') as f:
+    with open(args.output_file, "w") as f:
         f.write(json.dumps(data, indent=2))
