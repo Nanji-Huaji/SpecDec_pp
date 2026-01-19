@@ -2,8 +2,8 @@ OUT=alpaca_data
 FINAL=all.json
 DATASET=tatsu-lab/alpaca
 
-TARGET=/home/tiantianyi/code/DuoDecoding/qwen/Qwen3-14B
-DRAFT=/home/tiantianyi/code/DuoDecoding/qwen/Qwen3-1.7B
+TARGET=/home/tiantianyi/code/DuoDecoding/vicuna/vicuna-13b-v1.5
+DRAFT=/home/tiantianyi/code/DuoDecoding/vicuna/tiny-vicuna-1b
 
 mkdir -p ${OUT}
 mkdir -p ${OUT}/tmp
