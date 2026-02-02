@@ -46,6 +46,15 @@ def compute_metrics(eval_pred: "EvalPrediction") -> Dict:
 
 
 class MyTrainer(Trainer):
+    
+    def _move_model_to_device(self, model, device):
+        # Skip moving if the model (or its wrapped model) has a device_map.
+        # This prevents OOM when using device_map="auto" which spreads the model across GPUs.
+        if hasattr(model, "model") and hasattr(model.model, "hf_device_map"):
+            return
+        if hasattr(model, "hf_device_map"):
+            return
+        super()._move_model_to_device(model, device)
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         soft_labels = inputs.pop('soft_labels')
@@ -73,7 +82,10 @@ class MyTrainer(Trainer):
         )
         hidden_states = outputs.hidden_states
         print("hidden_states:", len(hidden_states), hidden_states[-1].shape)
-        orignal_logits = model.module.assist_acc_head(hidden_states[-1]) if is_parallel(model) else model.assist_acc_head(hidden_states[-1])
+        
+        acc_head = model.module.assist_acc_head if is_parallel(model) else model.assist_acc_head
+        hidden_state = hidden_states[-1].to(next(acc_head.parameters()).device)
+        orignal_logits = acc_head(hidden_state)
         orignal_logits = orignal_logits.float()
 
         num_class = 2
@@ -143,17 +155,20 @@ def smart_tokenizer_and_embedding_resize(
     Note: This is the unoptimized version that may make your embedding size not be divisible by 64.
     """
     num_new_tokens = tokenizer.add_special_tokens(special_tokens_dict)
-    model.resize_token_embeddings(len(tokenizer))
+    
+    # Ensure vocab size is at least model.config.vocab_size to avoid index out of bounds
+    new_vocab_size = max(len(tokenizer), model.config.vocab_size)
+    model.resize_token_embeddings(new_vocab_size)
 
     if num_new_tokens > 0:
         input_embeddings = model.get_input_embeddings().weight.data
         output_embeddings = model.get_output_embeddings().weight.data
 
-        input_embeddings_avg = input_embeddings[:-num_new_tokens].mean(dim=0, keepdim=True)
-        output_embeddings_avg = output_embeddings[:-num_new_tokens].mean(dim=0, keepdim=True)
+        input_embeddings_avg = input_embeddings[:len(tokenizer)-num_new_tokens].mean(dim=0, keepdim=True)
+        output_embeddings_avg = output_embeddings[:len(tokenizer)-num_new_tokens].mean(dim=0, keepdim=True)
 
-        input_embeddings[-num_new_tokens:] = input_embeddings_avg
-        output_embeddings[-num_new_tokens:] = output_embeddings_avg
+        input_embeddings[len(tokenizer)-num_new_tokens:len(tokenizer)] = input_embeddings_avg
+        output_embeddings[len(tokenizer)-num_new_tokens:len(tokenizer)] = output_embeddings_avg
 
 
 class SupervisedDataset(Dataset):
@@ -164,14 +179,14 @@ class SupervisedDataset(Dataset):
         self.input_ids = []
         self.soft_labels = []
         for item in data:
-            item['prefix'] = eval(item['prefix'])
-            item['tokens'] = eval(item['tokens'])
-            item['draft'] = eval(item['draft'])
+            item['prefix'] = eval(item['prefix']) if isinstance(item['prefix'], str) else item['prefix']
+            item['tokens'] = eval(item['tokens']) if isinstance(item['tokens'], str) else item['tokens']
+            item['draft'] = eval(item['draft']) if isinstance(item['draft'], str) else item['draft']
 
             # item['tokens'] are generated autoregressively from target model
             # item['draft'] are stochatic next-token predicted by the draft model
 
-            item['p_acc'] = eval(item['p_acc'])
+            item['p_acc'] = eval(item['p_acc']) if isinstance(item['p_acc'], str) else item['p_acc']
 
             prefix = torch.LongTensor(item['prefix'])
             Xs = torch.LongTensor(item['tokens'])
@@ -223,7 +238,7 @@ if __name__ == "__main__":
     training_args = parser.parse_args_into_dataclasses()[0]
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(training_args.model_name_or_path)
-    model = transformers.AutoModelForCausalLM.from_pretrained(training_args.model_name_or_path, attn_implementation="eager")
+    model = transformers.AutoModelForCausalLM.from_pretrained(training_args.model_name_or_path, attn_implementation="eager", device_map="auto")
     special_tokens_dict = dict()
     if tokenizer.pad_token is None:
         special_tokens_dict["pad_token"] = DEFAULT_PAD_TOKEN
@@ -247,6 +262,14 @@ if __name__ == "__main__":
     wrapped = WrapModel(model, assist_acc_head)
     wrapped.model.requires_grad_(False)
     print('num training example:', len(train_dataset))
+    
+    # Create output directory if it doesn't exist to avoid FileNotFoundError during save_state
+    import os
+    os.makedirs(training_args.output_dir, exist_ok=True)
+    
+    # Manually move the head to GPU because we will disable automatic placement
+    assist_acc_head.cuda()
+
     trainer = MyTrainer(model=wrapped, tokenizer=tokenizer, args=training_args, train_dataset = train_dataset, eval_dataset = eval_dataset, data_collator=data_collator, compute_metrics = compute_metrics)
     if training_args.evaluate_only:
         print("eval only. Loading from checkpoint:", training_args.output_dir)

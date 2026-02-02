@@ -1,8 +1,11 @@
+import os
+os.environ["VLLM_USE_V1"] = "0"
+
 from vllm import LLM, SamplingParams
 from transformers import AutoTokenizer
 import json
 import argparse
-import os
+# import os  <-- removed since it's already imported above
 from util import get_dataset, get_model, CKPT
 
 # Copy helper functions from gen_dataset.py
@@ -153,15 +156,14 @@ def main(args):
 
     # Initialize vLLM
     # tensor_parallel_size=1 ideally for single GPU.
-    # Disable v1 engine for now to fallback to stable v0 engine (which is more compatible)
-    os.environ["VLLM_USE_V1"] = "0"
-
+    # We set max_model_len to avoid large KV cache memory reservation (e.g. 4096 instead of 40960)
     llm = LLM(
         model=model_path,
         trust_remote_code=True,
         tensor_parallel_size=1,
-        gpu_memory_utilization=0.75,  # Lowered to avoid OOM
-        dtype="bfloat16",  # Enforce bfloat16 for modern GPUs/Models like Qwen
+        gpu_memory_utilization=0.85, # Increased utilization
+        max_model_len=4096,          # Hard limit sequence length to save KV cache memory
+        dtype="bfloat16",            # Enforce bfloat16 for modern GPUs/Models like Qwen
     )
 
     # Load dataset
