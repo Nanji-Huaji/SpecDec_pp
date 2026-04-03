@@ -1,9 +1,9 @@
-OUT=alpaca_data
+OUT=alpaca_data_gemma_270m_4b_it
 FINAL=all.json
 DATASET=tatsu-lab/alpaca
 
-TARGET=/home/tiantianyi/code/DuoDecoding/vicuna/vicuna-13b-v1.5
-DRAFT=/home/tiantianyi/code/DuoDecoding/vicuna/tiny-vicuna-1b
+TARGET=/home/tiantianyi/code/DuoDecoding/google/gemma-3-4b-it
+DRAFT=/home/tiantianyi/code/DuoDecoding/google/gemma-3-270m-it
 
 mkdir -p ${OUT}
 mkdir -p ${OUT}/tmp

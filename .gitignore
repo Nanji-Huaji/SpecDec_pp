@@ -3,3 +3,6 @@ data/datagen.log
 exp-weight6-layer3
 *.log
 *.json
+checkpoints/**
+!checkpoints/
+!checkpoints/README.md
