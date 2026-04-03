@@ -2,10 +2,9 @@ layer=3
 weight=6 
 thres=0.3 
 
-ckpt=exp-weight${weight}-layer${layer}
-
 target_model=/home/tiantianyi/code/DuoDecoding/qwen/Qwen3-14B
 draft_model=/home/tiantianyi/code/DuoDecoding/qwen/Qwen3-1.7B
+ckpt=$(python -m src.acc_head_registry "$draft_model" "$target_model" --format resolved-path)
 data=/home/tiantianyi/code/DuoDecoding/src/SpecDec_pp/data/dev.json
 SAVEPATH=/home/tiantianyi/code/DuoDecoding/src/SpecDec_pp/exp-weight6-layer3
 
@@ -14,7 +13,7 @@ python3 specdec_pp/evaluate.py \
   --assistant_name ${draft_model} \
   --num_assistant_tokens_schedule ada \
   --data_path ${data} \
-  --assist_acc_head_dir $ckpt\
+  --assist_acc_head_dir "$ckpt" \
   --do_sample \
   --random_seed 42 \
   --save_path ${SAVEPATH} \

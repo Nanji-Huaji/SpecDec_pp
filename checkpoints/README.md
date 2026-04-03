@@ -44,6 +44,51 @@ Recommended run name format:
 - `w{weight}-l{layers}`
 - append extra settings only when needed, for example `w6-l3-mix0.15`
 
+### Registry And Fallback Rule
+
+The project uses `checkpoints/acc_head_registry.json` as the primary registry for
+known prediction heads.
+
+Lookup order:
+
+1. resolve the pair through the registry
+2. if the pair is not registered, fall back to the default naming rule
+
+Default local path rule:
+
+```text
+src/SpecDec_pp/checkpoints/acc_head/<source_alias>--to--<target_alias>/<run_name>
+```
+
+Default run name:
+
+- `exp-weight6-layer3`
+- special case: `qwen1.5-0.5b-chat--to--qwen1.5-1.8b-chat` falls back to `exp-weight-layer3`
+
+This design keeps extension simple:
+
+- if a pair is stable, add it to the registry
+- if a new pair follows the default naming convention, no registry update is required
+
+You can also generate the pair name or path directly from the command line:
+
+```bash
+python -m src.acc_head_registry "Qwen/Qwen2-1.5B" "Qwen/Qwen2-3B"
+python -m src.acc_head_registry "Qwen/Qwen2-1.5B" "Qwen/Qwen2-3B" --format default-path
+python -m src.acc_head_registry "Qwen/Qwen3-0.6B" "Qwen/Qwen3-1.7B" --format resolved-path
+```
+
+In Python, use:
+
+```python
+from src.acc_head_registry import build_acc_head_pair_name, resolve_acc_head_path
+
+pair_name = build_acc_head_pair_name("Qwen/Qwen2-1.5B", "Qwen/Qwen2-3B")
+acc_head_path = resolve_acc_head_path("Qwen/Qwen2-1.5B", "Qwen/Qwen2-3B")
+```
+
+Callers should prefer these helpers over hardcoding checkpoint paths.
+
 ### Legacy Layout
 
 Some existing checkpoints are still stored under legacy directories named after
