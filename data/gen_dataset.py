@@ -1,17 +1,43 @@
 import os
+
 os.environ["VLLM_USE_V1"] = "0"
 
 from vllm import LLM, SamplingParams
-from transformers import AutoTokenizer
+from datasets import load_dataset, load_from_disk
 import json
 import argparse
-# import os  <-- removed since it's already imported above
-from util import get_dataset, get_model, CKPT
 
 # Copy helper functions from gen_dataset.py
 B_INST, E_INST = "[INST]", "[/INST]"
 import subprocess
-import re
+
+
+def get_dataset(name):
+    if name == "tatsu-lab/alpaca":
+        dataset_file = "alpaca"
+        if not os.path.exists(dataset_file):
+            dataset = load_dataset("tatsu-lab/alpaca")["train"]
+            dataset.save_to_disk(dataset_file)
+        else:
+            dataset = load_from_disk(dataset_file)
+    elif name == "openai_humaneval":
+        dataset_file = "humaneval"
+        if not os.path.exists(dataset_file):
+            dataset = load_dataset("openai_humaneval")["test"]
+            dataset.save_to_disk(dataset_file)
+        else:
+            dataset = load_from_disk(dataset_file)
+    elif name == "gsm8k_test":
+        dataset_file = "gsm8k"
+        if not os.path.exists(dataset_file):
+            dataset = load_dataset("gsm8k", "main")["test"]
+            dataset.save_to_disk(dataset_file)
+        else:
+            dataset = load_from_disk(dataset_file)
+    else:
+        raise NotImplementedError(f"Unsupported dataset: {name}")
+
+    return dataset
 
 
 def select_best_gpu():
@@ -51,9 +77,7 @@ def select_best_gpu():
         gpu_stats.sort(key=lambda x: x[1], reverse=True)
         best_gpu_idx, best_free_mem = gpu_stats[0]
 
-        print(
-            f"Auto-selecting GPU {best_gpu_idx} with {best_free_mem} MiB free."
-        )
+        print(f"Auto-selecting GPU {best_gpu_idx} with {best_free_mem} MiB free.")
         return str(best_gpu_idx)
 
     except FileNotFoundError:
@@ -107,7 +131,7 @@ def get_prompt(sample, dataset_name, model_name=""):
     if "qwen" in str(model_name).lower():
         # Qwen ChatML format
         return f"<|im_start|>user\n{prompt.strip()}<|im_end|>\n<|im_start|>assistant\n"
-    
+
     if "vicuna" in str(model_name).lower():
         return f"A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user.\n\nUSER: {prompt.strip()}\nASSISTANT:"
 
@@ -125,13 +149,17 @@ def parse_args():
     parser.add_argument("--max_length", type=int, default=512)
     parser.add_argument("--output_file", type=str, default=None)
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.9)
+    parser.add_argument("--tensor_parallel_size", type=int, default=1)
+    parser.add_argument("--max_model_len", type=int, default=4096)
     args = parser.parse_args()
     return args
 
 
 def main(args):
     if os.path.exists(args.output_file):
-        print(f"Output file {args.output_file} already exists. Exiting to avoid overwrite.")
+        print(
+            f"Output file {args.output_file} already exists. Exiting to avoid overwrite."
+        )
         return
     print(f"Using vLLM with do_sample={args.do_sample}")
 
@@ -141,16 +169,7 @@ def main(args):
     best_gpu = select_best_gpu()
     os.environ["CUDA_VISIBLE_DEVICES"] = best_gpu
 
-    # Resolve model path using util.CKPT logic
-    # Note: vLLM loads model by path directly
-    root_dir = (
-        "/home/tty/code/DuoDecoding"  # hardcoded based on util.py context
-    )
-    # Try to resolve simplified name if present in CKPT, else use as is
-    # Logic copied roughly from util.py but adapted because util.py modifies CKPT in place
     model_path = args.model_name
-    # If users passed a short name key that exists in CKPT logic (though util.py is tricky to import variables from perfectly if they run code outside main)
-    # We will assume args.model_name is the full path or HF hub id as passed in shell script
 
     print(f"Loading model: {model_path}")
 
@@ -160,10 +179,10 @@ def main(args):
     llm = LLM(
         model=model_path,
         trust_remote_code=True,
-        tensor_parallel_size=1,
-        gpu_memory_utilization=0.85, # Increased utilization
-        max_model_len=4096,          # Hard limit sequence length to save KV cache memory
-        dtype="bfloat16",            # Enforce bfloat16 for modern GPUs/Models like Qwen
+        tensor_parallel_size=args.tensor_parallel_size,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        max_model_len=args.max_model_len,
+        dtype="bfloat16",  # Enforce bfloat16 for modern GPUs/Models like Qwen
     )
 
     # Load dataset

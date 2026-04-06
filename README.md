@@ -107,21 +107,18 @@ We augment the draft model with a trained acceptance prediction head to predict 
 
 ## Using `SpecDec++`
 
-**Step 0 (Optional)**: To start with, prepare a conda environment with pytorch installed. If not, you can use the following command.
+Use Python 3.10 and initialize the environments from `src/SpecDec_pp`. This project uses a dual-environment setup:
 
-```
-conda create -n specdecpp python=3.11    
-conda activate specdecpp 
-conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
+- `.venv` for the main SpecDec++ pipeline
+- `.venv-vllm` for `data/gen_dataset.py`, which depends on `vllm`
+
+```bash
+uv venv --clear .venv --python 3.10
+uv pip install --python .venv/bin/python -r requirements.txt
+./scripts/setup_vllm_env.sh
 ```
 
-**Step 1**: Clone the repository and install the required packages. 
-
-```
-git clone git@github.com:Kaffaljidhmah2/SpecDec_pp.git
-cd SpecDec_pp
-pip install -r requirements.txt
-```
+If you use the helper scripts below, you do not need to activate either environment manually.
 
 
 ### Checkpoint Release & Sampling Code
@@ -140,6 +137,85 @@ Please take a look at [specdec_pp/sample.py](specdec_pp/sample.py) for how to us
 Follow the instructions in [data/readme.md](./data/readme.md) for dataset preparation. After running the code, you should be able to get the Alpaca dataset (`data/alpaca_data/train.json`, `data/alpaca_data/dev.json`, `data/alpaca_data/test.json`), HumanEval dataset (`data/humaneval_data/test.json`), and GSM8K test dataset (`data/gsm8k_test_data/test.json`) for llama-2-chat models.
 
 ### Training the Acceptance Prediction Heads.
+
+This workflow uses two environments:
+
+- `.venv`: the main SpecDec++ environment used for `prepare_acc_head.py`, training, and post-processing
+- `.venv-vllm`: a dedicated environment used only for `data/gen_dataset.py`, because `vllm` conflicts with the rest of the SpecDec++ stack
+
+Set them up from `src/SpecDec_pp`:
+
+```bash
+uv venv --clear .venv --python 3.10
+uv pip install --python .venv/bin/python -r requirements.txt
+./scripts/setup_vllm_env.sh
+```
+
+The `setup_vllm_env.sh` script creates `.venv-vllm`, installs a CUDA 12.1-compatible PyTorch stack together with `vllm==0.5.4`, and applies the small `pyairports` compatibility shim required by `outlines`.
+
+If you want a single command that generates the acceptance-head dataset, splits it,
+trains the head, and writes it to the DuoDecoding-compatible checkpoint layout,
+you can use `prepare_acc_head.py`.
+
+Example:
+
+```bash
+cd /home/tiantianyi/code/DuoDecoding/src/SpecDec_pp
+./scripts/run_prepare_acc_head.sh \
+  --draft-model llama-68m \
+  --draft-model-path /home/tiantianyi/code/DuoDecoding/llama/llama-68m \
+  --target-model llama-2-7b-chat \
+  --target-model-path /home/tiantianyi/code/DuoDecoding/meta-llama/Llama-2-7b-chat-hf \
+  --dataset-name tatsu-lab/alpaca \
+  --overwrite
+```
+
+By default `run_prepare_acc_head.sh` uses:
+
+- `SPECDEC_MAIN_PYTHON=./.venv/bin/python`
+- `SPECDEC_DATASET_PYTHON=./.venv-vllm/bin/python`
+
+You can override either one through environment variables if your local setup differs.
+
+By default this will:
+
+- generate intermediate data under `data/generated/<pair-name>/<dataset-slug>/`
+- produce `train.json`, `dev.json`, and `test.json`
+- train the acceptance head with the existing SpecDec++ pipeline
+- save the final head under `checkpoints/acc_head/<pair-name>/exp-weight6-layer3/`
+- register or update the pair automatically in `checkpoints/acc_head_registry.json`
+
+This output layout matches DuoDecoding's acceptance-head path convention, so the
+result can be resolved directly by `resolve_acc_head_path(...)` after training.
+
+Use `--draft-model` and `--target-model` as the canonical pair names you want in
+the output directory and registry. If the actual model must be loaded from a
+local absolute path or a different Hugging Face id, pass it via
+`--draft-model-path` or `--target-model-path`.
+
+Useful options:
+
+```bash
+./scripts/run_prepare_acc_head.sh \
+  --draft-model llama-68m \
+  --target-model llama-2-7b-chat \
+  --dataset-name tatsu-lab/alpaca \
+  --overwrite \
+  --layer 3 \
+  --weight-mismatch 6 \
+  --mixing-ratio 0.15
+```
+
+If you already have generated `train.json` and `dev.json`, you can skip data
+generation and only rerun training:
+
+```bash
+./scripts/run_prepare_acc_head.sh \
+  --draft-model llama-68m \
+  --target-model llama-2-7b-chat \
+  --dataset-dir data/generated/llama-68m--to--llama-2-7b-chat/tatsu-lab__alpaca \
+  --skip-data
+```
 
 
 Please modify the following code for training. Here `layer` indicates the number of layers of the ResNet prediction head, `weight` is the loss weight for the mismatched tokens for the BCE loss (the weight for the matched tokens is `1`). The mixing ratio can be set via `--mixing_ratio` (default is 0.15).
