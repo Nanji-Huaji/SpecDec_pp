@@ -1,4 +1,3 @@
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 import time
 import json
 import torch
@@ -47,12 +46,12 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     if os.path.exists(args.output_file):
-        print(f"Output file {args.output_file} already exists. Exiting to avoid overwrite.")
+        print(
+            f"Output file {args.output_file} already exists. Exiting to avoid overwrite."
+        )
         exit(0)
     data = read_data(args.input_file)
-    data = get_acc_prob(
-        data, target_name=args.target_name, draft_name=args.draft_name
-    )
+    data = get_acc_prob(data, target_name=args.target_name, draft_name=args.draft_name)
 
     if args.output_file is None or len(args.output_file) == 0:
         args.output_file = args.input_file.rstrip(".json") + "_acc.json"

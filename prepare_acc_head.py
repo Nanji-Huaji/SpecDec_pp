@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Iterable
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -127,6 +128,38 @@ def parse_args() -> argparse.Namespace:
         help="max_model_len passed to vLLM during dataset generation.",
     )
     parser.add_argument(
+        "--data-nproc-per-node",
+        type=int,
+        default=1,
+        help=(
+            "Number of worker processes used for sliced data generation in "
+            "gen_assistant.py and gen_log_p.py."
+        ),
+    )
+    parser.add_argument(
+        "--data-gpus",
+        default=None,
+        help=(
+            "Comma-separated GPU ids assigned to data-generation workers. "
+            "Defaults to 0..N-1 when --data-nproc-per-node > 1."
+        ),
+    )
+    parser.add_argument(
+        "--data-batch-size",
+        type=int,
+        default=None,
+        help="Optional batch size override used by gen_assistant.py and gen_log_p.py.",
+    )
+    parser.add_argument(
+        "--data-device-mode",
+        default="auto",
+        choices=["auto", "single_gpu"],
+        help=(
+            "Model placement mode for sliced data generation workers. Use "
+            "single_gpu to force each worker onto its assigned GPU."
+        ),
+    )
+    parser.add_argument(
         "--layer",
         type=int,
         default=3,
@@ -196,6 +229,21 @@ def parse_args() -> argparse.Namespace:
         help="WANDB_PROJECT value used for training.",
     )
     parser.add_argument(
+        "--train-nproc-per-node",
+        type=int,
+        default=1,
+        help=(
+            "Number of GPU worker processes used for SpecDec++ training. "
+            "Values greater than 1 launch training with torchrun."
+        ),
+    )
+    parser.add_argument(
+        "--train-master-port",
+        type=int,
+        default=29500,
+        help="Master port used by torchrun when --train-nproc-per-node > 1.",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Delete existing intermediate data and output head before rerunning.",
@@ -246,6 +294,198 @@ def resolve_dataset_python(explicit_python: str | None) -> str:
         return env_python
 
     return sys.executable
+
+
+def build_train_command(
+    args: argparse.Namespace,
+    train_file: Path,
+    dev_file: Path,
+    output_dir: Path,
+    draft_model_ref: str,
+) -> list[str]:
+    train_entrypoint = [
+        "train.py",
+        "--data_path",
+        str(train_file),
+        "--eval_data_path",
+        str(dev_file),
+        "--output_dir",
+        str(output_dir),
+        "--model_name_or_path",
+        draft_model_ref,
+        "--bf16",
+        str(args.bf16),
+        "--per_device_train_batch_size",
+        str(args.per_device_train_batch_size),
+        "--num_train_epochs",
+        str(args.num_train_epochs),
+        "--gradient_accumulation_steps",
+        str(args.gradient_accumulation_steps),
+        "--logging_steps",
+        str(args.logging_steps),
+        "--eval_strategy",
+        "epoch",
+        "--per_device_eval_batch_size",
+        str(args.per_device_eval_batch_size),
+        "--weight_mismatch",
+        str(args.weight_mismatch),
+        "--save_strategy",
+        "no",
+        "--warmup_ratio",
+        str(args.warmup_ratio),
+        "--lr_scheduler_type",
+        args.lr_scheduler_type,
+        "--resnet_num_layers",
+        str(args.layer),
+        "--mixing_ratio",
+        str(args.mixing_ratio),
+    ]
+
+    if args.train_nproc_per_node > 1:
+        return [
+            sys.executable,
+            "-m",
+            "torch.distributed.run",
+            "--nproc_per_node",
+            str(args.train_nproc_per_node),
+            "--master_port",
+            str(args.train_master_port),
+        ] + train_entrypoint
+
+    return [sys.executable] + train_entrypoint
+
+
+def parse_data_gpus(data_gpus: str | None, worker_count: int) -> list[str]:
+    if worker_count <= 1:
+        return []
+
+    if data_gpus is None:
+        return [str(idx) for idx in range(worker_count)]
+
+    gpus = [gpu.strip() for gpu in data_gpus.split(",") if gpu.strip()]
+    if len(gpus) < worker_count:
+        raise ValueError(
+            f"Need at least {worker_count} GPU ids for data generation, got {len(gpus)}."
+        )
+    return gpus[:worker_count]
+
+
+def load_json_records(path: Path) -> list[dict]:
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def dump_json_records(path: Path, records: list[dict]) -> None:
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(records, f, indent=2)
+        f.write("\n")
+
+
+def partition_ranges(total_size: int, num_parts: int) -> list[tuple[int, int]]:
+    base, remainder = divmod(total_size, num_parts)
+    ranges: list[tuple[int, int]] = []
+    start = 0
+    for idx in range(num_parts):
+        end = start + base + (1 if idx < remainder else 0)
+        if start < end:
+            ranges.append((start, end))
+        start = end
+    return ranges
+
+
+def part_file(output_path: Path, part_idx: int) -> Path:
+    return output_path.with_name(
+        f"{output_path.stem}.part{part_idx:03d}{output_path.suffix}"
+    )
+
+
+def merge_part_files(part_paths: Iterable[Path], output_path: Path) -> None:
+    merged: list[dict] = []
+    for path in part_paths:
+        merged.extend(load_json_records(path))
+    dump_json_records(output_path, merged)
+
+
+def run_data_stage(
+    *,
+    stage_script: str,
+    model_name: str,
+    input_file: Path,
+    output_file: Path,
+    worker_count: int,
+    gpus: list[str],
+    batch_size: int | None,
+    device_mode: str,
+    extra_args: list[str],
+) -> None:
+    if worker_count <= 1:
+        command = [
+            sys.executable,
+            stage_script,
+            "--model_name",
+            model_name,
+            "--input_file",
+            str(input_file),
+            "--output_file",
+            str(output_file),
+            "--device_mode",
+            device_mode,
+        ]
+        if batch_size is not None:
+            command += ["--batch_size", str(batch_size)]
+        command += extra_args
+        run_cmd(command, cwd=DATA_ROOT)
+        return
+
+    total_records = len(load_json_records(input_file))
+    ranges = partition_ranges(total_records, worker_count)
+    processes: list[subprocess.Popen] = []
+    part_paths: list[Path] = []
+    try:
+        for part_idx, (start, end) in enumerate(ranges):
+            part_path = part_file(output_file, part_idx)
+            part_paths.append(part_path)
+            env = os.environ.copy()
+            env["CUDA_VISIBLE_DEVICES"] = gpus[part_idx]
+            command = [
+                sys.executable,
+                stage_script,
+                "--model_name",
+                model_name,
+                "--input_file",
+                str(input_file),
+                "--output_file",
+                str(part_path),
+                "--n_begin",
+                str(start),
+                "--n_end",
+                str(end),
+                "--device_mode",
+                device_mode,
+            ]
+            if batch_size is not None:
+                command += ["--batch_size", str(batch_size)]
+            command += extra_args
+            print(f"\n[run] cwd={DATA_ROOT}")
+            print(
+                "[run] "
+                + "CUDA_VISIBLE_DEVICES="
+                + gpus[part_idx]
+                + " "
+                + " ".join(command)
+            )
+            processes.append(subprocess.Popen(command, cwd=str(DATA_ROOT), env=env))
+
+        for process in processes:
+            return_code = process.wait()
+            if return_code != 0:
+                raise subprocess.CalledProcessError(return_code, process.args)
+
+        merge_part_files(part_paths, output_file)
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
 
 
 def update_acc_head_registry(
@@ -331,10 +571,15 @@ def main() -> None:
     tmp4 = tmp_dir / "tmp4_target_logp.json"
     train_file = dataset_dir / "train.json"
     dev_file = dataset_dir / "dev.json"
+    test_file = dataset_dir / "test.json"
+    data_gpus = parse_data_gpus(args.data_gpus, args.data_nproc_per_node)
 
     if args.overwrite:
-        for path in [tmp1, tmp2, tmp3, tmp4, all_file, train_file, dev_file]:
+        for path in [tmp1, tmp2, tmp3, tmp4, all_file, train_file, dev_file, test_file]:
             remove_path(path)
+            if path.suffix:
+                for part_path in tmp_dir.glob(f"{path.stem}.part*{path.suffix}"):
+                    remove_path(part_path)
         if output_dir.exists():
             remove_path(output_dir)
 
@@ -369,45 +614,41 @@ def main() -> None:
             gen_dataset_cmd.append("--do_sample")
         run_cmd(gen_dataset_cmd, cwd=DATA_ROOT)
 
-        gen_assistant_cmd = common_python + [
-            "gen_assistant.py",
-            "--model_name",
-            draft_model_ref,
-            "--input_file",
-            str(tmp1),
-            "--output_file",
-            str(tmp2),
-        ]
-        if args.do_sample:
-            gen_assistant_cmd.append("--do_sample")
-        run_cmd(gen_assistant_cmd, cwd=DATA_ROOT)
-
-        run_cmd(
-            common_python
-            + [
-                "gen_log_p.py",
-                "--model_name",
-                draft_model_ref,
-                "--input_file",
-                str(tmp2),
-                "--output_file",
-                str(tmp3),
-            ],
-            cwd=DATA_ROOT,
+        assistant_extra_args: list[str] = ["--do_sample"] if args.do_sample else []
+        run_data_stage(
+            stage_script="gen_assistant.py",
+            model_name=draft_model_ref,
+            input_file=tmp1,
+            output_file=tmp2,
+            worker_count=args.data_nproc_per_node,
+            gpus=data_gpus,
+            batch_size=args.data_batch_size,
+            device_mode=args.data_device_mode,
+            extra_args=assistant_extra_args,
         )
 
-        run_cmd(
-            common_python
-            + [
-                "gen_log_p.py",
-                "--model_name",
-                target_model_ref,
-                "--input_file",
-                str(tmp3),
-                "--output_file",
-                str(tmp4),
-            ],
-            cwd=DATA_ROOT,
+        run_data_stage(
+            stage_script="gen_log_p.py",
+            model_name=draft_model_ref,
+            input_file=tmp2,
+            output_file=tmp3,
+            worker_count=args.data_nproc_per_node,
+            gpus=data_gpus,
+            batch_size=args.data_batch_size,
+            device_mode=args.data_device_mode,
+            extra_args=[],
+        )
+
+        run_data_stage(
+            stage_script="gen_log_p.py",
+            model_name=target_model_ref,
+            input_file=tmp3,
+            output_file=tmp4,
+            worker_count=args.data_nproc_per_node,
+            gpus=data_gpus,
+            batch_size=args.data_batch_size,
+            device_mode=args.data_device_mode,
+            extra_args=[],
         )
 
         run_cmd(
@@ -445,45 +686,21 @@ def main() -> None:
 
     train_env = os.environ.copy()
     train_env["WANDB_PROJECT"] = args.wandb_project
+    if (
+        "WANDB_API_KEY" not in train_env
+        and "WANDB_MODE" not in train_env
+        and "WANDB_DISABLED" not in train_env
+    ):
+        train_env["WANDB_MODE"] = "offline"
+        print("[info] WANDB_API_KEY not set, defaulting to WANDB_MODE=offline")
 
-    train_cmd = [
-        sys.executable,
-        "train.py",
-        "--data_path",
-        str(train_file),
-        "--eval_data_path",
-        str(dev_file),
-        "--output_dir",
-        str(output_dir),
-        "--model_name_or_path",
-        draft_model_ref,
-        "--bf16",
-        str(args.bf16),
-        "--per_device_train_batch_size",
-        str(args.per_device_train_batch_size),
-        "--num_train_epochs",
-        str(args.num_train_epochs),
-        "--gradient_accumulation_steps",
-        str(args.gradient_accumulation_steps),
-        "--logging_steps",
-        str(args.logging_steps),
-        "--evaluation_strategy",
-        "epoch",
-        "--per_device_eval_batch_size",
-        str(args.per_device_eval_batch_size),
-        "--weight_mismatch",
-        str(args.weight_mismatch),
-        "--save_strategy",
-        "no",
-        "--warmup_ratio",
-        str(args.warmup_ratio),
-        "--lr_scheduler_type",
-        args.lr_scheduler_type,
-        "--resnet_num_layers",
-        str(args.layer),
-        "--mixing_ratio",
-        str(args.mixing_ratio),
-    ]
+    train_cmd = build_train_command(
+        args=args,
+        train_file=train_file,
+        dev_file=dev_file,
+        output_dir=output_dir,
+        draft_model_ref=draft_model_ref,
+    )
     run_cmd(train_cmd, cwd=SPECDEC_ROOT / "specdec_pp", env=train_env)
 
     registry_entry = update_acc_head_registry(

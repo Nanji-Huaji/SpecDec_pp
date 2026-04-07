@@ -1,7 +1,6 @@
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    BitsAndBytesConfig,
     AutoConfig,
 )
 import time
@@ -11,9 +10,6 @@ import torch.nn as nn
 from datasets import load_dataset, load_from_disk
 import os
 import argparse
-
-import bitsandbytes as bnb
-from transformers import BitsAndBytesConfig
 
 # Bypass FP8 hardware check for Ampere GPUs
 import transformers.quantizers.auto as auto_quantizer
@@ -127,37 +123,60 @@ for key in CKPT:
     )
 
 
-def get_model(model_name):
+def get_model(model_name, *, device_mode="auto", load_tokenizer=True):
     checkpoint = CKPT.get(model_name, model_name)
     dtype = torch.bfloat16
     print("model checkpoint: ", checkpoint)
     print("model dtype: ", dtype)
+    print("device mode: ", device_mode)
     # quant_config = BitsAndBytesConfig(
     #     load_in_4bit=True,
     #     bnb_4bit_compute_dtype=torch.bfloat16,  # 计算 dtype，可改为 torch.float16/torch.bfloat16
     #     bnb_4bit_use_double_quant=True,
     #     bnb_4bit_quant_type="nf4",
     # )
+    model_kwargs = {
+        "torch_dtype": dtype,
+        "local_files_only": True,
+    }
+    if device_mode == "auto":
+        model_kwargs["device_map"] = "auto"
+
     model = AutoModelForCausalLM.from_pretrained(
         checkpoint,
         # quantization_config=quant_config,
-        torch_dtype=dtype,
-        device_map="auto",
-        local_files_only=True,
+        **model_kwargs,
     )
 
-    # Check if we need to dequantize
-    # We look for FP8Linear in the model
-    from transformers.integrations.finegrained_fp8 import FP8Linear
+    # Check if we need to dequantize. Some environments do not have Triton
+    # fully available, so skip FP8 inspection when the integration cannot load.
+    try:
+        from transformers.integrations.finegrained_fp8 import FP8Linear
+    except Exception as exc:
+        print(f"Skipping FP8 inspection: {exc}")
+    else:
+        has_fp8 = any(isinstance(m, FP8Linear) for m in model.modules())
+        if has_fp8:
+            dequantize_fp8_model(model)
 
-    has_fp8 = any(isinstance(m, FP8Linear) for m in model.modules())
-    if has_fp8:
-        dequantize_fp8_model(model)
+    if device_mode == "single_gpu":
+        model = model.to("cuda")
 
     # model = torch.compile(model)
-    tokenizer = AutoTokenizer.from_pretrained(checkpoint, local_files_only=True)
+    tokenizer = None
+    if load_tokenizer:
+        tokenizer = AutoTokenizer.from_pretrained(checkpoint, local_files_only=True)
 
     return tokenizer, model
+
+
+def get_input_device(model):
+    hf_device_map = getattr(model, "hf_device_map", None)
+    if hf_device_map:
+        # Accelerate/auto device_map may offload modules to CPU or meta; CPU inputs are safest.
+        return torch.device("cpu")
+
+    return next(model.parameters()).device
 
 
 def get_dataset(name):

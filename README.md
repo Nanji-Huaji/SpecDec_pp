@@ -153,9 +153,31 @@ uv pip install --python .venv/bin/python -r requirements.txt
 
 The `setup_vllm_env.sh` script creates `.venv-vllm`, installs a CUDA 12.1-compatible PyTorch stack together with `vllm==0.5.4`, and applies the small `pyairports` compatibility shim required by `outlines`.
 
+`requirements.txt` is intentionally the main-environment dependency set and does not install `vllm`. The vLLM dependency lives only in `.venv-vllm` through `scripts/setup_vllm_env.sh`.
+
 If you want a single command that generates the acceptance-head dataset, splits it,
 trains the head, and writes it to the DuoDecoding-compatible checkpoint layout,
 you can use `prepare_acc_head.py`.
+
+The recommended entrypoint is the wrapper script:
+
+```bash
+./scripts/run_prepare_acc_head.sh ...
+```
+
+It automatically uses:
+
+- `.venv` for `prepare_acc_head.py`, training, and post-processing
+- `.venv-vllm` only for `data/gen_dataset.py`
+
+This is the unified entrypoint for:
+
+- target-side continuation generation
+- draft generation
+- draft and target log-prob generation
+- acceptance-probability construction
+- dataset splitting
+- acceptance-head training
 
 Example:
 
@@ -167,6 +189,37 @@ cd /home/tiantianyi/code/DuoDecoding/src/SpecDec_pp
   --target-model llama-2-7b-chat \
   --target-model-path /home/tiantianyi/code/DuoDecoding/meta-llama/Llama-2-7b-chat-hf \
   --dataset-name tatsu-lab/alpaca \
+  --overwrite
+```
+
+Single-GPU end-to-end example:
+
+```bash
+cd /home/tiantianyi/code/DuoDecoding/src/SpecDec_pp
+./scripts/run_prepare_acc_head.sh \
+  --draft-model qwen-3-1.7b \
+  --draft-model-path /home/tiantianyi/code/DuoDecoding/qwen/Qwen3-1.7B \
+  --target-model qwen-3-14b \
+  --target-model-path /home/tiantianyi/code/DuoDecoding/qwen/Qwen3-14B \
+  --dataset-name tatsu-lab/alpaca \
+  --overwrite
+```
+
+Multi-GPU data generation plus multi-GPU training example:
+
+```bash
+cd /home/tiantianyi/code/DuoDecoding/src/SpecDec_pp
+./scripts/run_prepare_acc_head.sh \
+  --draft-model Qwen/Qwen3-14B \
+  --draft-model-path /home/tiantianyi/code/DuoDecoding/Qwen/Qwen3-14B \
+  --target-model Qwen/Qwen3-32B \
+  --target-model-path /home/tiantianyi/code/DuoDecoding/Qwen/Qwen3-32B \
+  --dataset-name tatsu-lab/alpaca \
+  --data-nproc-per-node 4 \
+  --data-gpus 0,1,2,3 \
+  --data-device-mode single_gpu \
+  --data-batch-size 8 \
+  --train-nproc-per-node 4 \
   --overwrite
 ```
 
@@ -206,6 +259,21 @@ Useful options:
   --mixing-ratio 0.15
 ```
 
+Useful multi-GPU options:
+
+- `--data-nproc-per-node N`: number of parallel workers used by `gen_assistant.py` and `gen_log_p.py`
+- `--data-gpus 0,1,...`: GPU ids assigned to those workers
+- `--data-device-mode single_gpu`: force each data worker to load its model on one GPU
+- `--data-device-mode auto`: fallback when a model does not fit cleanly on one GPU
+- `--data-batch-size B`: override batch size for `gen_assistant.py` and `gen_log_p.py`
+- `--train-nproc-per-node N`: launch `specdec_pp/train.py` with `torchrun`
+
+Recommended usage:
+
+- If both draft and target models fit on a single GPU during data generation, prefer `--data-device-mode single_gpu`
+- If you see out-of-memory errors during data generation, switch to `--data-device-mode auto` first
+- If throughput is still low, reduce `--data-batch-size`
+
 If you already have generated `train.json` and `dev.json`, you can skip data
 generation and only rerun training:
 
@@ -218,7 +286,23 @@ generation and only rerun training:
 ```
 
 
-Please modify the following code for training. Here `layer` indicates the number of layers of the ResNet prediction head, `weight` is the loss weight for the mismatched tokens for the BCE loss (the weight for the matched tokens is `1`). The mixing ratio can be set via `--mixing_ratio` (default is 0.15).
+If you want to rerun only training with multi-GPU launch on existing splits:
+
+```bash
+./scripts/run_prepare_acc_head.sh \
+  --draft-model qwen-3-1.7b \
+  --target-model qwen-3-14b \
+  --dataset-dir data/generated/qwen-3-1.7b--to--qwen-3-14b/tatsu-lab__alpaca \
+  --skip-data \
+  --train-nproc-per-node 4
+```
+
+The legacy direct `train.py` invocation is still available for debugging, but the
+recommended path is to use `run_prepare_acc_head.sh` as the unified command entry.
+
+If you still need the low-level training command, `layer` indicates the number of
+layers of the ResNet prediction head, `weight` is the loss weight for mismatched
+tokens for the BCE loss, and `--mixing_ratio` controls the data mixing ratio.
 
 ```bash
 layer=3

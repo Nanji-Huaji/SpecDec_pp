@@ -84,9 +84,7 @@ def compute_metrics(eval_pred: "EvalPrediction") -> Dict:
     ) * numpy.log(1 - target_prob_safe)
 
     # KL = CrossEntropy - Entropy
-    KL_elementwise = (
-        CrossEnt + Ent
-    )  # 注意 Ent本身是负的，所以是 CrossEnt - (-Ent) ?
+    KL_elementwise = CrossEnt + Ent  # 注意 Ent本身是负的，所以是 CrossEnt - (-Ent) ?
     # 修正：Ent = p*log(p)... 是负值。KL = H(P,Q) - H(P).
     # H(P,Q) = CrossEnt (正值表达). H(P) = -Ent (正值表达).
     # 所以 KL = CrossEnt - (-Ent) = CrossEnt + Ent
@@ -97,7 +95,6 @@ def compute_metrics(eval_pred: "EvalPrediction") -> Dict:
 
 
 class MyTrainer(Trainer):
-
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         # 提取 labels，Trainer 会自动处理 device，但以防万一
         soft_labels = inputs.pop("soft_labels")
@@ -172,9 +169,7 @@ class MyTrainer(Trainer):
             self.args.weight_mismatch * soft_labels_0[mask].sum()
             + soft_labels_1[mask].sum()
         ) + 1e-6
-        loss = (
-            loss_0 * soft_labels_0 + loss_1 * soft_labels_1
-        ).sum() / denominator
+        loss = (loss_0 * soft_labels_0 + loss_1 * soft_labels_1).sum() / denominator
 
         if model.training:
             # 记录 KL 散度用于监控
@@ -238,9 +233,9 @@ def smart_tokenizer_and_embedding_resize(
         input_embeddings = model.get_input_embeddings().weight.data
         output_embeddings = model.get_output_embeddings().weight.data
 
-        input_embeddings_avg = input_embeddings[
-            : len(tokenizer) - num_new_tokens
-        ].mean(dim=0, keepdim=True)
+        input_embeddings_avg = input_embeddings[: len(tokenizer) - num_new_tokens].mean(
+            dim=0, keepdim=True
+        )
         output_embeddings_avg = output_embeddings[
             : len(tokenizer) - num_new_tokens
         ].mean(dim=0, keepdim=True)
@@ -272,14 +267,10 @@ class SupervisedDataset(Dataset):
                 else item["tokens"]
             )
             item["draft"] = (
-                eval(item["draft"])
-                if isinstance(item["draft"], str)
-                else item["draft"]
+                eval(item["draft"]) if isinstance(item["draft"], str) else item["draft"]
             )
             item["p_acc"] = (
-                eval(item["p_acc"])
-                if isinstance(item["p_acc"], str)
-                else item["p_acc"]
+                eval(item["p_acc"]) if isinstance(item["p_acc"], str) else item["p_acc"]
             )
 
             prefix = torch.LongTensor(item["prefix"])
@@ -303,9 +294,7 @@ class SupervisedDataset(Dataset):
         return len(self.input_ids)
 
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
-        return dict(
-            input_ids=self.input_ids[i], soft_labels=self.soft_labels[i]
-        )
+        return dict(input_ids=self.input_ids[i], soft_labels=self.soft_labels[i])
 
 
 @dataclass
@@ -344,7 +333,8 @@ if __name__ == "__main__":
     )
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(
-        training_args.model_name_or_path
+        training_args.model_name_or_path,
+        use_fast=False,
     )
 
     # 强制 BF16，禁用 Flash Attention，禁用自动 device_map
@@ -413,9 +403,7 @@ if __name__ == "__main__":
     if training_args.evaluate_only:
         print("eval only. Loading from checkpoint:", training_args.output_dir)
         # 加载时也需要转为 BF16
-        loaded_head = AcceptancePredictionHead.from_pretrained(
-            training_args.output_dir
-        )
+        loaded_head = AcceptancePredictionHead.from_pretrained(training_args.output_dir)
         wrapped.assist_acc_head = loaded_head.to(torch.bfloat16)
         trainer.evaluate()
     else:
