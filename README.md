@@ -215,11 +215,11 @@ cd /home/tiantianyi/code/DuoDecoding/src/SpecDec_pp
   --target-model Qwen/Qwen3-32B \
   --target-model-path /home/tiantianyi/code/DuoDecoding/Qwen/Qwen3-32B \
   --dataset-name tatsu-lab/alpaca \
-  --data-nproc-per-node 4 \
-  --data-gpus 0,1,2,3 \
+  --data-nproc-per-node 3 \
+  --data-gpus 0,1,2 \
   --data-device-mode single_gpu \
   --data-batch-size 8 \
-  --train-nproc-per-node 4 \
+  --train-nproc-per-node 3 \
   --overwrite
 ```
 
@@ -261,6 +261,7 @@ Useful options:
 
 Useful multi-GPU options:
 
+- `--dataset-tensor-parallel-size N`: number of GPUs used by `data/gen_dataset.py` for vLLM tensor parallelism
 - `--data-nproc-per-node N`: number of parallel workers used by `gen_assistant.py` and `gen_log_p.py`
 - `--data-gpus 0,1,...`: GPU ids assigned to those workers
 - `--data-device-mode single_gpu`: force each data worker to load its model on one GPU
@@ -270,6 +271,7 @@ Useful multi-GPU options:
 
 Recommended usage:
 
+- For large target models in `gen_dataset.py`, set `CUDA_VISIBLE_DEVICES` and pass `--dataset-tensor-parallel-size` to match the number of visible GPUs
 - If both draft and target models fit on a single GPU during data generation, prefer `--data-device-mode single_gpu`
 - If you see out-of-memory errors during data generation, switch to `--data-device-mode auto` first
 - If throughput is still low, reduce `--data-batch-size`

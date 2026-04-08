@@ -128,6 +128,11 @@ def parse_args() -> argparse.Namespace:
         help="max_model_len passed to vLLM during dataset generation.",
     )
     parser.add_argument(
+        "--dataset-disable-custom-all-reduce",
+        action="store_true",
+        help="Disable vLLM custom all-reduce kernels during dataset generation.",
+    )
+    parser.add_argument(
         "--data-nproc-per-node",
         type=int,
         default=1,
@@ -610,6 +615,8 @@ def main() -> None:
             "--output_file",
             str(tmp1),
         ]
+        if args.dataset_disable_custom_all_reduce:
+            gen_dataset_cmd.append("--disable_custom_all_reduce")
         if args.do_sample:
             gen_dataset_cmd.append("--do_sample")
         run_cmd(gen_dataset_cmd, cwd=DATA_ROOT)

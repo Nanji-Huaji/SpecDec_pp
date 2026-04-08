@@ -48,7 +48,7 @@ def select_best_gpu():
     # Check if CUDA_VISIBLE_DEVICES is already set by user
     if "CUDA_VISIBLE_DEVICES" in os.environ:
         print(
-            f"CUDA_VISIBLE_DEVICES is already set to {os.environ['CUDA_VISIBLE_DEVICES']}. Using specified GPU."
+            f"CUDA_VISIBLE_DEVICES is already set to {os.environ['CUDA_VISIBLE_DEVICES']}. Using specified GPU(s)."
         )
         return os.environ["CUDA_VISIBLE_DEVICES"]
 
@@ -151,6 +151,11 @@ def parse_args():
     parser.add_argument("--gpu_memory_utilization", type=float, default=0.9)
     parser.add_argument("--tensor_parallel_size", type=int, default=1)
     parser.add_argument("--max_model_len", type=int, default=4096)
+    parser.add_argument(
+        "--disable_custom_all_reduce",
+        action="store_true",
+        help="Disable vLLM custom all-reduce kernels.",
+    )
     args = parser.parse_args()
     return args
 
@@ -163,15 +168,34 @@ def main(args):
         return
     print(f"Using vLLM with do_sample={args.do_sample}")
 
-    # Auto-select GPU before initializing vLLM
-    # This must be done BEFORE importing vLLM or initializing it if vLLM respects CUDA_VISIBLE_DEVICES
-    # However, since vLLM is already imported at top, setting environ here might affect LLM.__init__
-    best_gpu = select_best_gpu()
-    os.environ["CUDA_VISIBLE_DEVICES"] = best_gpu
+    # For tensor parallel runs, preserve the caller's visible devices so vLLM can
+    # shard across them. For single-GPU runs, keep the existing auto-pick behavior.
+    if args.tensor_parallel_size > 1:
+        visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+        if visible_devices:
+            print(
+                "Using caller-provided CUDA_VISIBLE_DEVICES="
+                f"{visible_devices} with tensor_parallel_size={args.tensor_parallel_size}."
+            )
+        else:
+            print(
+                "tensor_parallel_size > 1 and CUDA_VISIBLE_DEVICES is not set; "
+                "vLLM will use its default visible GPUs."
+            )
+    else:
+        # Auto-select GPU before initializing vLLM.
+        best_gpu = select_best_gpu()
+        os.environ["CUDA_VISIBLE_DEVICES"] = best_gpu
 
     model_path = args.model_name
 
     print(f"Loading model: {model_path}")
+
+    disable_custom_all_reduce = (
+        args.disable_custom_all_reduce or args.tensor_parallel_size > 1
+    )
+    if disable_custom_all_reduce:
+        print("Disabling vLLM custom all-reduce kernels for dataset generation.")
 
     # Initialize vLLM
     # tensor_parallel_size=1 ideally for single GPU.
@@ -183,6 +207,7 @@ def main(args):
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_model_len=args.max_model_len,
         dtype="bfloat16",  # Enforce bfloat16 for modern GPUs/Models like Qwen
+        disable_custom_all_reduce=disable_custom_all_reduce,
     )
 
     # Load dataset

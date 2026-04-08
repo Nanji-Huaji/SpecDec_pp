@@ -1,12 +1,12 @@
-transformers==4.44.2
-huggingface-hub>=0.36.0,<1
+transformers==4.57.6
+huggingface-hub
 datasets>=2.14.0,<3
 numpy<2
 pyarrow>=14,<15
 accelerate>=1.12.0
 wandb>=0.25.0
 scipy>=1.15.0
-torch==2.4.1
+torch==2.9.0
 torchvision==0.19.1
 torchaudio==2.4.1
 sentencepiece
