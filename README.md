@@ -215,13 +215,19 @@ cd /home/tiantianyi/code/DuoDecoding/src/SpecDec_pp
   --target-model Qwen/Qwen3-32B \
   --target-model-path /home/tiantianyi/code/DuoDecoding/Qwen/Qwen3-32B \
   --dataset-name tatsu-lab/alpaca \
-  --data-nproc-per-node 3 \
-  --data-gpus 0,1,2 \
-  --data-device-mode single_gpu \
+  --data-nproc-per-node 2 \
+  --data-gpus '0,1;2,3' \
+  --data-device-mode auto \
   --data-batch-size 8 \
-  --train-nproc-per-node 3 \
+  --train-nproc-per-node 2 \
   --overwrite
 ```
+
+This example launches two data workers:
+
+- worker 0 sees GPUs `0,1`
+- worker 1 sees GPUs `2,3`
+- each worker loads one model with `device_map="auto"` across its visible GPUs
 
 By default `run_prepare_acc_head.sh` uses:
 
@@ -263,17 +269,23 @@ Useful multi-GPU options:
 
 - `--dataset-tensor-parallel-size N`: number of GPUs used by `data/gen_dataset.py` for vLLM tensor parallelism
 - `--data-nproc-per-node N`: number of parallel workers used by `gen_assistant.py` and `gen_log_p.py`
-- `--data-gpus 0,1,...`: GPU ids assigned to those workers
+- `--data-gpus '0;1;2'`: worker GPU groups for single-GPU workers
+- `--data-gpus '0,1;2,3'`: worker GPU groups when each worker shards one model across multiple GPUs
 - `--data-device-mode single_gpu`: force each data worker to load its model on one GPU
-- `--data-device-mode auto`: fallback when a model does not fit cleanly on one GPU
+- `--data-device-mode auto`: allow each data worker to shard its model across all GPUs visible to that worker
 - `--data-batch-size B`: override batch size for `gen_assistant.py` and `gen_log_p.py`
+- `--data-bucket-by-length`: bucket samples by sequence length in `gen_log_p.py` while preserving final output order
 - `--train-nproc-per-node N`: launch `specdec_pp/train.py` with `torchrun`
 
 Recommended usage:
 
 - For large target models in `gen_dataset.py`, set `CUDA_VISIBLE_DEVICES` and pass `--dataset-tensor-parallel-size` to match the number of visible GPUs
 - If both draft and target models fit on a single GPU during data generation, prefer `--data-device-mode single_gpu`
-- If you see out-of-memory errors during data generation, switch to `--data-device-mode auto` first
+- If you use multi-GPU worker groups such as `--data-gpus '0,1;2,3'`, you must also set `--data-device-mode auto`
+- For a single worker that shards one model across two GPUs, use `--data-nproc-per-node 1 --data-gpus '0,1' --data-device-mode auto`
+- For two-way data parallelism with one two-GPU model per worker, use `--data-nproc-per-node 2 --data-gpus '0,1;2,3' --data-device-mode auto`
+- If `gen_log_p.py` is slow because of variable-length inputs, try `--data-bucket-by-length` before making larger code changes
+- If you see out-of-memory errors during data generation with single-GPU workers, switch to `--data-device-mode auto` and assign a multi-GPU group to each worker
 - If throughput is still low, reduce `--data-batch-size`
 
 If you already have generated `train.json` and `dev.json`, you can skip data

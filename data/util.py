@@ -136,17 +136,36 @@ def get_model(model_name, *, device_mode="auto", load_tokenizer=True):
     #     bnb_4bit_quant_type="nf4",
     # )
     model_kwargs = {
-        "torch_dtype": dtype,
+        "dtype": dtype,
         "local_files_only": True,
+        "low_cpu_mem_usage": True,
     }
     if device_mode == "auto":
         model_kwargs["device_map"] = "auto"
+
+        visible_device_count = torch.cuda.device_count()
+        if visible_device_count > 0:
+            max_memory = {}
+            for device_idx in range(visible_device_count):
+                total_bytes = torch.cuda.get_device_properties(device_idx).total_memory
+                usable_gib = max(1, int(total_bytes * 0.92 / (1024**3)))
+                max_memory[device_idx] = f"{usable_gib}GiB"
+            model_kwargs["max_memory"] = max_memory
 
     model = AutoModelForCausalLM.from_pretrained(
         checkpoint,
         # quantization_config=quant_config,
         **model_kwargs,
     )
+
+    hf_device_map = getattr(model, "hf_device_map", None)
+    if hf_device_map:
+        print("hf_device_map:", hf_device_map)
+        cpu_shards = [name for name, device in hf_device_map.items() if device == "cpu"]
+        if cpu_shards:
+            print(
+                f"Warning: {len(cpu_shards)} modules were offloaded to CPU; this will slow generation."
+            )
 
     # Check if we need to dequantize. Some environments do not have Triton
     # fully available, so skip FP8 inspection when the integration cannot load.

@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import time
 from ast import literal_eval as eval
 
 import torch
@@ -28,19 +29,41 @@ def slice_data(data, n_begin, n_end):
 
 
 @torch.no_grad()
-def get_log_prob(data, model, model_name, batch_size=None):
+def get_log_prob(
+    data,
+    model,
+    model_name,
+    batch_size=None,
+    *,
+    bucket_by_length=False,
+):
     input_device = get_input_device(model)
     if batch_size is None:
         batch_size = 4 if input_device.type == "cpu" else 16
 
+    if bucket_by_length:
+        ordered_indices = sorted(
+            range(len(data)),
+            key=lambda idx: len(data[idx]["prefix"]) + len(data[idx]["tokens"]),
+        )
+    else:
+        ordered_indices = list(range(len(data)))
+
     print(
         f"Calculating log probabilities for {len(data)} samples with batch_size={batch_size}"
     )
+    if bucket_by_length:
+        print(
+            "Batching strategy: bucketed by sequence length; output order is preserved."
+        )
+
+    run_start = time.time()
 
     for batch_start in tqdm(
-        range(0, len(data), batch_size), desc="Calculating log-prob batches"
+        range(0, len(ordered_indices), batch_size), desc="Calculating log-prob batches"
     ):
-        batch = data[batch_start : batch_start + batch_size]
+        batch_indices = ordered_indices[batch_start : batch_start + batch_size]
+        batch = [data[idx] for idx in batch_indices]
         joints = [item["prefix"] + item["tokens"] for item in batch]
         max_len = max(len(joint) for joint in joints)
 
@@ -55,18 +78,26 @@ def get_log_prob(data, model, model_name, batch_size=None):
         attention_mask = attention_mask.to(input_device)
 
         logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
-        log_probs = logits.log_softmax(dim=-1)
 
-        for row, item in enumerate(batch):
+        for row, original_idx in enumerate(batch_indices):
+            item = data[original_idx]
             start = len(item["prefix"]) - 1
             end = start + len(item["draft"])
+            token_logits = logits[row, start:end]
             draft_index = torch.tensor(
-                item["draft"], dtype=torch.long, device=log_probs.device
+                item["draft"], dtype=torch.long, device=token_logits.device
             ).unsqueeze(-1)
-            token_log_probs = torch.take_along_dim(
-                log_probs[row, start:end], draft_index, dim=-1
-            )
-            item[f"log_p_{model_name}"] = token_log_probs[:, 0].cpu().tolist()
+            selected_logits = torch.take_along_dim(token_logits, draft_index, dim=-1)[
+                :, 0
+            ]
+            log_norm = torch.logsumexp(token_logits, dim=-1)
+            item[f"log_p_{model_name}"] = (selected_logits - log_norm).cpu().tolist()
+
+    elapsed = time.time() - run_start
+    if elapsed > 0:
+        print(
+            f"Completed log-prob generation in {elapsed:.1f}s ({len(data) / elapsed:.2f} samples/s)"
+        )
 
     return data
 
@@ -85,6 +116,11 @@ def parse_args():
         choices=["auto", "single_gpu"],
         default="auto",
     )
+    parser.add_argument(
+        "--bucket_by_length",
+        action="store_true",
+        help="Bucket samples by sequence length during batching while preserving output order.",
+    )
     return parser.parse_args()
 
 
@@ -100,7 +136,13 @@ if __name__ == "__main__":
     _, model = get_model(
         args.model_name, device_mode=args.device_mode, load_tokenizer=False
     )
-    data = get_log_prob(data, model, args.model_name, batch_size=args.batch_size)
+    data = get_log_prob(
+        data,
+        model,
+        args.model_name,
+        batch_size=args.batch_size,
+        bucket_by_length=args.bucket_by_length,
+    )
 
     suffix = "logP"
     if args.output_file is None or len(args.output_file) == 0:

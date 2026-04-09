@@ -145,8 +145,10 @@ def parse_args() -> argparse.Namespace:
         "--data-gpus",
         default=None,
         help=(
-            "Comma-separated GPU ids assigned to data-generation workers. "
-            "Defaults to 0..N-1 when --data-nproc-per-node > 1."
+            "Semicolon-separated GPU groups assigned to data-generation workers. "
+            "Use commas within a worker group, for example '0;1' for two single-GPU "
+            "workers or '0,1;2,3' for two workers that each shard one model across "
+            "two GPUs. When omitted, defaults to 0..N-1 only for single-GPU workers."
         ),
     )
     parser.add_argument(
@@ -154,6 +156,14 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Optional batch size override used by gen_assistant.py and gen_log_p.py.",
+    )
+    parser.add_argument(
+        "--data-bucket-by-length",
+        action="store_true",
+        help=(
+            "Bucket samples by sequence length in gen_log_p.py while preserving "
+            "the final output order."
+        ),
     )
     parser.add_argument(
         "--data-device-mode",
@@ -362,17 +372,70 @@ def build_train_command(
 
 def parse_data_gpus(data_gpus: str | None, worker_count: int) -> list[str]:
     if worker_count <= 1:
-        return []
+        if data_gpus is None:
+            return []
+
+        group = data_gpus.strip()
+        if not group:
+            raise ValueError("--data-gpus must not be empty when provided.")
+
+        if ";" in group:
+            groups = [item.strip() for item in group.split(";") if item.strip()]
+            if len(groups) != 1:
+                raise ValueError(
+                    "When --data-nproc-per-node is 1, --data-gpus must describe exactly one worker group."
+                )
+            return groups
+
+        return [group]
 
     if data_gpus is None:
         return [str(idx) for idx in range(worker_count)]
 
-    gpus = [gpu.strip() for gpu in data_gpus.split(",") if gpu.strip()]
-    if len(gpus) < worker_count:
+    groups = [group.strip() for group in data_gpus.split(";") if group.strip()]
+    if len(groups) != worker_count:
         raise ValueError(
-            f"Need at least {worker_count} GPU ids for data generation, got {len(gpus)}."
+            "When --data-nproc-per-node > 1, --data-gpus must provide exactly "
+            f"{worker_count} worker groups separated by ';', got {len(groups)}."
         )
-    return gpus[:worker_count]
+
+    for group in groups:
+        if not group:
+            raise ValueError("GPU worker groups must not be empty.")
+
+    return groups
+
+
+def validate_data_gpu_config(
+    worker_count: int,
+    gpu_groups: list[str],
+    device_mode: str,
+) -> None:
+    if worker_count <= 1 and not gpu_groups:
+        return
+
+    if worker_count > 1 and len(gpu_groups) != worker_count:
+        raise ValueError(
+            f"Expected {worker_count} GPU worker groups, got {len(gpu_groups)}."
+        )
+
+    seen_gpu_ids: set[str] = set()
+    for group in gpu_groups:
+        gpu_ids = [gpu.strip() for gpu in group.split(",") if gpu.strip()]
+        if not gpu_ids:
+            raise ValueError("Each GPU worker group must contain at least one GPU id.")
+
+        if len(gpu_ids) > 1 and device_mode != "auto":
+            raise ValueError(
+                "Multi-GPU worker groups require --data-device-mode auto so the model can shard across visible GPUs."
+            )
+
+        for gpu_id in gpu_ids:
+            if gpu_id in seen_gpu_ids:
+                raise ValueError(
+                    f"GPU id '{gpu_id}' appears in more than one worker group. Use disjoint GPU groups."
+                )
+            seen_gpu_ids.add(gpu_id)
 
 
 def load_json_records(path: Path) -> list[dict]:
@@ -423,6 +486,9 @@ def run_data_stage(
     device_mode: str,
     extra_args: list[str],
 ) -> None:
+    if worker_count > 1:
+        print(f"[info] Launching {worker_count} data workers with GPU groups: {gpus}")
+
     if worker_count <= 1:
         command = [
             sys.executable,
@@ -578,6 +644,11 @@ def main() -> None:
     dev_file = dataset_dir / "dev.json"
     test_file = dataset_dir / "test.json"
     data_gpus = parse_data_gpus(args.data_gpus, args.data_nproc_per_node)
+    validate_data_gpu_config(
+        worker_count=args.data_nproc_per_node,
+        gpu_groups=data_gpus,
+        device_mode=args.data_device_mode,
+    )
 
     if args.overwrite:
         for path in [tmp1, tmp2, tmp3, tmp4, all_file, train_file, dev_file, test_file]:
@@ -643,7 +714,7 @@ def main() -> None:
             gpus=data_gpus,
             batch_size=args.data_batch_size,
             device_mode=args.data_device_mode,
-            extra_args=[],
+            extra_args=["--bucket_by_length"] if args.data_bucket_by_length else [],
         )
 
         run_data_stage(
@@ -655,7 +726,7 @@ def main() -> None:
             gpus=data_gpus,
             batch_size=args.data_batch_size,
             device_mode=args.data_device_mode,
-            extra_args=[],
+            extra_args=["--bucket_by_length"] if args.data_bucket_by_length else [],
         )
 
         run_cmd(
