@@ -197,10 +197,10 @@ Single-GPU end-to-end example:
 ```bash
 cd /home/tiantianyi/code/DuoDecoding/src/SpecDec_pp
 ./scripts/run_prepare_acc_head.sh \
-  --draft-model qwen-3-1.7b \
-  --draft-model-path /home/tiantianyi/code/DuoDecoding/qwen/Qwen3-1.7B \
-  --target-model qwen-3-14b \
-  --target-model-path /home/tiantianyi/code/DuoDecoding/qwen/Qwen3-14B \
+  --draft-model llama-68m \
+  --draft-model-path /home/tiantianyi/code/DuoDecoding/llama/llama-68m \
+  --target-model llama-2-13b \
+  --target-model-path /home/tiantianyi/code/DuoDecoding/meta-llama/Llama-2-13b-hf \
   --dataset-name tatsu-lab/alpaca \
   --overwrite
 ```
@@ -209,25 +209,46 @@ Multi-GPU data generation plus multi-GPU training example:
 
 ```bash
 cd /home/tiantianyi/code/DuoDecoding/src/SpecDec_pp
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+
 ./scripts/run_prepare_acc_head.sh \
-  --draft-model Qwen/Qwen3-14B \
-  --draft-model-path /home/tiantianyi/code/DuoDecoding/Qwen/Qwen3-14B \
-  --target-model Qwen/Qwen3-32B \
-  --target-model-path /home/tiantianyi/code/DuoDecoding/Qwen/Qwen3-32B \
+  --draft-model llama-68m \
+  --draft-model-path /home/tiantianyi/code/DuoDecoding/llama/llama-68m \
+  --target-model llama-2-13b \
+  --target-model-path /home/tiantianyi/code/DuoDecoding/llama/Llama-2-13b-hf \
   --dataset-name tatsu-lab/alpaca \
   --data-nproc-per-node 2 \
   --data-gpus '0,1;2,3' \
   --data-device-mode auto \
+  --dataset-tensor-parallel-size 2 \
   --data-batch-size 8 \
   --train-nproc-per-node 2 \
   --overwrite
 ```
 
-This example launches two data workers:
+ export CUDA_VISIBLE_DEVICES=0,1
+./scripts/run_prepare_acc_head.sh \
+  --draft-model llama-68m \
+  --draft-model-path /home/tiantianyi/code/DuoDecoding/llama/llama-68m \
+  --target-model llama-2-13b \
+  --target-model-path /home/tiantianyi/code/DuoDecoding/llama/Llama-2-13b-hf \
+  --dataset-name tatsu-lab/alpaca \
+  --dataset-max-samples 20001 \
+  --train-samples 16000 \
+  --dev-samples 2000 \
+  --test-samples 2001 \
+  --data-nproc-per-node 2 \
+  --data-gpus '0;1' \
+  --data-device-mode single_gpu \
+  --train-nproc-per-node 2 \
+  --batch_size 10
+
+This example launches two dataset/data workers:
 
 - worker 0 sees GPUs `0,1`
 - worker 1 sees GPUs `2,3`
-- each worker loads one model with `device_map="auto"` across its visible GPUs
+- `gen_dataset.py` runs as `2-way DP x 2-way TP`
+- `gen_assistant.py` and `gen_log_p.py` reuse the same worker GPU groups with `--data-device-mode auto`
 
 By default `run_prepare_acc_head.sh` uses:
 
@@ -265,10 +286,25 @@ Useful options:
   --mixing-ratio 0.15
 ```
 
+To run a smaller debug subset end-to-end:
+
+```bash
+./scripts/run_prepare_acc_head.sh \
+  --draft-model llama-68m \
+  --target-model llama-2-7b-chat \
+  --dataset-name tatsu-lab/alpaca \
+  --dataset-max-samples 2000 \
+  --train-samples 1600 \
+  --dev-samples 200 \
+  --test-samples 200 \
+  --overwrite
+```
+
 Useful multi-GPU options:
 
 - `--dataset-tensor-parallel-size N`: number of GPUs used by `data/gen_dataset.py` for vLLM tensor parallelism
-- `--data-nproc-per-node N`: number of parallel workers used by `gen_assistant.py` and `gen_log_p.py`
+- `--dataset-max-samples N`: cap the total number of raw dataset rows processed before downstream stages
+- `--data-nproc-per-node N`: number of parallel workers used by `gen_dataset.py`, `gen_assistant.py`, and `gen_log_p.py`
 - `--data-gpus '0;1;2'`: worker GPU groups for single-GPU workers
 - `--data-gpus '0,1;2,3'`: worker GPU groups when each worker shards one model across multiple GPUs
 - `--data-device-mode single_gpu`: force each data worker to load its model on one GPU
@@ -283,7 +319,10 @@ Recommended usage:
 - If both draft and target models fit on a single GPU during data generation, prefer `--data-device-mode single_gpu`
 - If you use multi-GPU worker groups such as `--data-gpus '0,1;2,3'`, you must also set `--data-device-mode auto`
 - For a single worker that shards one model across two GPUs, use `--data-nproc-per-node 1 --data-gpus '0,1' --data-device-mode auto`
-- For two-way data parallelism with one two-GPU model per worker, use `--data-nproc-per-node 2 --data-gpus '0,1;2,3' --data-device-mode auto`
+- For two-way data parallelism with one single-GPU model per worker, use `--data-nproc-per-node 2 --data-gpus '0;1' --data-device-mode single_gpu`
+- For `2-way DP x 2-way TP` during dataset generation, use `--data-nproc-per-node 2 --data-gpus '0,1;2,3' --data-device-mode auto --dataset-tensor-parallel-size 2`
+- When `--dataset-tensor-parallel-size > 1`, each `--data-gpus` worker group must contain exactly that many GPU ids
+- Use `--dataset-max-samples` when you want a smaller end-to-end debug run rather than generating the entire source dataset
 - If `gen_log_p.py` is slow because of variable-length inputs, try `--data-bucket-by-length` before making larger code changes
 - If you see out-of-memory errors during data generation with single-GPU workers, switch to `--data-device-mode auto` and assign a multi-GPU group to each worker
 - If throughput is still low, reduce `--data-batch-size`

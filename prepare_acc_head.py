@@ -128,6 +128,12 @@ def parse_args() -> argparse.Namespace:
         help="max_model_len passed to vLLM during dataset generation.",
     )
     parser.add_argument(
+        "--dataset-max-samples",
+        type=int,
+        default=None,
+        help="Optional cap on the total number of raw dataset samples processed.",
+    )
+    parser.add_argument(
         "--dataset-disable-custom-all-reduce",
         action="store_true",
         help="Disable vLLM custom all-reduce kernels during dataset generation.",
@@ -438,6 +444,43 @@ def validate_data_gpu_config(
             seen_gpu_ids.add(gpu_id)
 
 
+def validate_dataset_parallel_config(args: argparse.Namespace) -> None:
+    if args.dataset_tensor_parallel_size <= 1:
+        if args.dataset_max_samples is not None and args.dataset_max_samples <= 0:
+            raise ValueError("--dataset-max-samples must be a positive integer.")
+        return
+
+    if args.dataset_max_samples is not None and args.dataset_max_samples <= 0:
+        raise ValueError("--dataset-max-samples must be a positive integer.")
+
+    if args.data_device_mode != "auto":
+        raise ValueError(
+            "--dataset-tensor-parallel-size > 1 requires --data-device-mode auto."
+        )
+
+    if not args.data_gpus:
+        raise ValueError(
+            "--dataset-tensor-parallel-size > 1 requires explicit --data-gpus so each "
+            "dataset worker receives a fixed multi-GPU group."
+        )
+
+    gpu_groups = parse_data_gpus(args.data_gpus, args.data_nproc_per_node)
+    if len(gpu_groups) != args.data_nproc_per_node:
+        raise ValueError(
+            "Dataset worker GPU groups must match --data-nproc-per-node when "
+            "--dataset-tensor-parallel-size > 1."
+        )
+
+    for group in gpu_groups:
+        gpu_ids = [gpu.strip() for gpu in group.split(",") if gpu.strip()]
+        if len(gpu_ids) != args.dataset_tensor_parallel_size:
+            raise ValueError(
+                "Each --data-gpus worker group must contain exactly "
+                f"{args.dataset_tensor_parallel_size} GPU ids when "
+                "--dataset-tensor-parallel-size is set."
+            )
+
+
 def load_json_records(path: Path) -> list[dict]:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
@@ -472,6 +515,133 @@ def merge_part_files(part_paths: Iterable[Path], output_path: Path) -> None:
     for path in part_paths:
         merged.extend(load_json_records(path))
     dump_json_records(output_path, merged)
+
+
+def get_dataset_record_count(dataset_python: str, dataset_name: str) -> int:
+    command = [
+        dataset_python,
+        "-c",
+        (
+            "from gen_dataset import get_dataset; "
+            f"print(len(get_dataset({dataset_name!r})))"
+        ),
+    ]
+    result = subprocess.run(
+        command,
+        cwd=str(DATA_ROOT),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    stdout = result.stdout.strip().splitlines()
+    if not stdout:
+        raise RuntimeError(
+            f"Failed to determine dataset length for {dataset_name!r}: no output returned."
+        )
+
+    try:
+        return int(stdout[-1].strip())
+    except ValueError as exc:
+        raise RuntimeError(
+            f"Failed to parse dataset length for {dataset_name!r} from output: {stdout[-1]!r}"
+        ) from exc
+
+
+def run_dataset_stage(
+    *,
+    dataset_python: str,
+    dataset_name: str,
+    model_name: str,
+    output_file: Path,
+    worker_count: int,
+    gpus: list[str],
+    max_length: int,
+    gpu_memory_utilization: float,
+    tensor_parallel_size: int,
+    max_model_len: int,
+    max_samples: int | None,
+    disable_custom_all_reduce: bool,
+    do_sample: bool,
+) -> None:
+    base_command = [
+        dataset_python,
+        "gen_dataset.py",
+        "--dataset_name",
+        dataset_name,
+        "--model_name",
+        model_name,
+        "--mode",
+        "hf",
+        "--max_length",
+        str(max_length),
+        "--gpu_memory_utilization",
+        str(gpu_memory_utilization),
+        "--tensor_parallel_size",
+        str(tensor_parallel_size),
+        "--max_model_len",
+        str(max_model_len),
+    ]
+    if disable_custom_all_reduce:
+        base_command.append("--disable_custom_all_reduce")
+    if do_sample:
+        base_command.append("--do_sample")
+
+    if worker_count <= 1:
+        command = base_command
+        if max_samples is not None:
+            command += ["--n_begin", "0", "--n_end", str(max_samples)]
+        command += ["--output_file", str(output_file)]
+        run_cmd(command, cwd=DATA_ROOT)
+        return
+
+    total_records = get_dataset_record_count(dataset_python, dataset_name)
+    if max_samples is not None:
+        total_records = min(total_records, max_samples)
+    ranges = partition_ranges(total_records, worker_count)
+    print(
+        f"[info] Launching {len(ranges)} dataset workers with GPU groups: {gpus[: len(ranges)]}"
+    )
+
+    processes: list[subprocess.Popen] = []
+    part_paths: list[Path] = []
+    try:
+        for part_idx, (start, end) in enumerate(ranges):
+            part_path = part_file(output_file, part_idx)
+            part_paths.append(part_path)
+            env = os.environ.copy()
+            env["CUDA_VISIBLE_DEVICES"] = gpus[part_idx]
+            command = base_command + [
+                "--n_begin",
+                str(start),
+                "--n_end",
+                str(end),
+                "--output_file",
+                str(part_path),
+            ]
+            print(f"\n[run] cwd={DATA_ROOT}")
+            print(
+                f"[info] dataset worker {part_idx}: range=[{start}, {end}), "
+                f"gpus={gpus[part_idx]}, tensor_parallel_size={tensor_parallel_size}"
+            )
+            print(
+                "[run] "
+                + "CUDA_VISIBLE_DEVICES="
+                + gpus[part_idx]
+                + " "
+                + " ".join(command)
+            )
+            processes.append(subprocess.Popen(command, cwd=str(DATA_ROOT), env=env))
+
+        for process in processes:
+            return_code = process.wait()
+            if return_code != 0:
+                raise subprocess.CalledProcessError(return_code, process.args)
+
+        merge_part_files(part_paths, output_file)
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
 
 
 def run_data_stage(
@@ -649,6 +819,7 @@ def main() -> None:
         gpu_groups=data_gpus,
         device_mode=args.data_device_mode,
     )
+    validate_dataset_parallel_config(args)
 
     if args.overwrite:
         for path in [tmp1, tmp2, tmp3, tmp4, all_file, train_file, dev_file, test_file]:
@@ -665,32 +836,23 @@ def main() -> None:
 
     if not args.skip_data:
         common_python = [sys.executable]
-        dataset_python = [resolve_dataset_python(args.dataset_python)]
+        dataset_python = resolve_dataset_python(args.dataset_python)
 
-        gen_dataset_cmd = dataset_python + [
-            "gen_dataset.py",
-            "--dataset_name",
-            args.dataset_name,
-            "--model_name",
-            target_model_ref,
-            "--mode",
-            "hf",
-            "--max_length",
-            str(args.max_length),
-            "--gpu_memory_utilization",
-            str(args.dataset_gpu_memory_utilization),
-            "--tensor_parallel_size",
-            str(args.dataset_tensor_parallel_size),
-            "--max_model_len",
-            str(args.dataset_max_model_len),
-            "--output_file",
-            str(tmp1),
-        ]
-        if args.dataset_disable_custom_all_reduce:
-            gen_dataset_cmd.append("--disable_custom_all_reduce")
-        if args.do_sample:
-            gen_dataset_cmd.append("--do_sample")
-        run_cmd(gen_dataset_cmd, cwd=DATA_ROOT)
+        run_dataset_stage(
+            dataset_python=dataset_python,
+            dataset_name=args.dataset_name,
+            model_name=target_model_ref,
+            output_file=tmp1,
+            worker_count=args.data_nproc_per_node,
+            gpus=data_gpus,
+            max_length=args.max_length,
+            gpu_memory_utilization=args.dataset_gpu_memory_utilization,
+            tensor_parallel_size=args.dataset_tensor_parallel_size,
+            max_model_len=args.dataset_max_model_len,
+            max_samples=args.dataset_max_samples,
+            disable_custom_all_reduce=args.dataset_disable_custom_all_reduce,
+            do_sample=args.do_sample,
+        )
 
         assistant_extra_args: list[str] = ["--do_sample"] if args.do_sample else []
         run_data_stage(

@@ -392,7 +392,7 @@ if __name__ == "__main__":
 
     trainer = MyTrainer(
         model=wrapped,
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
